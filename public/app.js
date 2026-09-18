@@ -809,6 +809,8 @@ function applyView() {
   state.scale = Math.max(min, Math.min(max, state.scale));
   clampPan();
   els.wrap.style.transform = `translate(${state.panX}px, ${state.panY}px) scale(${state.scale})`;
+  const dr = els.desk.getBoundingClientRect();
+  state.lastDesk = { w: dr.width, h: dr.height };
   syncTiles();
   updateNav();
 }
@@ -846,6 +848,17 @@ function jumpTo(frac) {
 function resetView() {
   state.scale = heightFitScale();
   state.panX = PAD;
+  applyView();
+}
+
+// 桌面尺寸变了：以原来屏幕中心下的那一点为准，缩放不变，只平移
+function keepView() {
+  const r = els.desk.getBoundingClientRect();
+  const last = state.lastDesk || { w: r.width, h: r.height };
+  const cx = (last.w / 2 - state.panX) / state.scale;
+  const cy = (last.h / 2 - state.panY) / state.scale;
+  state.panX = r.width / 2 - cx * state.scale;
+  state.panY = r.height / 2 - cy * state.scale;
   applyView();
 }
 
@@ -982,7 +995,13 @@ function onRawPoints(raws) {
   const s = state.current;
   if (!state.drawing || !s || !raws.length) return;
   state.lastRaw = raws[raws.length - 1];
-  if (s.snapped) return; // 已经吸附成形状，松手前不再改
+  if (s.snapped) {
+    // 吸附后又明显动了：说明只是画到一半停了一下，恢复成手画的线接着画
+    const a = state.holdAt;
+    const slop = (HOLD_SLOP[state.inputType] || 3) * 2;
+    if (!a || Math.hypot(state.lastRaw.x - a.x, state.lastRaw.y - a.y) * state.scale < slop) return;
+    unsnap();
+  }
   if (s.shape === "line") {
     s.points = [s.points[0], state.lastRaw];
     scheduleLive();
@@ -1030,6 +1049,7 @@ function trySnap() {
   if (!state.drawing || !s || s.snapped || s.shape || s.type === "eraser") return;
   const shape = recognizeShape(s.points);
   if (!shape) return;
+  s.freehand = s.points;
   s.points = shape.points;
   s.shape = shape.kind;
   s.snapped = true;
@@ -1037,6 +1057,17 @@ function trySnap() {
   if (!s.pending) send({ type: "stroke_replace", id: s.id, points: s.points, shape: s.shape });
   scheduleLive();
   toast(`已吸附成${SHAPE_NAMES[shape.name]}`, 1200);
+}
+
+function unsnap() {
+  const s = state.current;
+  s.points = s.freehand;
+  s.shape = undefined;
+  s.snapped = false;
+  state.pointBuf = [];
+  state.brushPos = s.points[s.points.length - 1];
+  if (!s.pending) send({ type: "stroke_replace", id: s.id, points: s.points, shape: null });
+  scheduleLive();
 }
 
 // 认形状：先看是不是直线；首尾相接的再比椭圆和矩形哪个更贴
@@ -1143,8 +1174,6 @@ function endStroke() {
   }
   clearTimeout(state.snapTimer);
   const cur = state.current;
-  // 防抖让笔尖落后于指针；松手时补到指针所在处，线条停在你松手的地方
-  if (state.stab && !cur.snapped && !cur.shape && state.lastRaw) addPoints([state.lastRaw]);
   if (cur.pending) commitPending(); // 轻点一下也算一笔（一个点）
   flushPoints();
   send({ type: "stroke_end", id: state.current.id });
@@ -1650,7 +1679,7 @@ function setChatOpen(open) {
     updateUnread();
     renderChat(true);
   }
-  fitView();
+  keepView();
 }
 
 // 输入框随内容长高（最多约 5 行），接近 200 字时显示字数
@@ -2833,8 +2862,9 @@ function bindUi() {
   els.desk.addEventListener("contextmenu", (e) => e.preventDefault());
   window.addEventListener("keydown", onKeyDown);
   window.addEventListener("keyup", onKeyUp);
+  // 手机上地址栏收起/展开、弹出键盘都会触发 resize：保持当前缩放和看到的位置，不重新回正
   window.addEventListener("resize", () => {
-    if (!els.wall.hidden) fitView();
+    if (!els.wall.hidden) keepView();
   });
   window.addEventListener("popstate", boot);
 }

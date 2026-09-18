@@ -536,6 +536,15 @@ async function main() {
       const end = await b.wait((m) => m.type === "stroke_end" && m.id === id);
       assert(end.stroke.shape === "ellipse" && end.stroke.points.length === 3, "replaced points land");
 
+      // 吸附后又继续画：换回手画的点，形状清掉
+      const id3 = uuid();
+      a.send({ type: "stroke_start", id: id3, strokeType: "pen", brush: "ink", color: snap.you.color, width: 8, x: 5, y: 5 });
+      a.send({ type: "stroke_replace", id: id3, shape: "line", points: [{ x: 5, y: 5 }, { x: 90, y: 5 }] });
+      a.send({ type: "stroke_replace", id: id3, shape: null, points: [{ x: 5, y: 5 }, { x: 40, y: 9 }, { x: 90, y: 5 }] });
+      a.send({ type: "stroke_end", id: id3 });
+      const end3 = await b.wait((m) => m.type === "stroke_end" && m.id === id3);
+      assert(end3.stroke.shape === undefined && end3.stroke.points.length === 3, "unsnap restores freehand");
+
       const id2 = uuid();
       a.send({ type: "stroke_start", id: id2, strokeType: "pen", brush: "glitter", shape: "star", color: snap.you.color, width: 24, x: 10, y: 10 });
       const st2 = await b.wait((m) => m.type === "stroke_start" && m.stroke.id === id2);
@@ -543,7 +552,7 @@ async function main() {
       a.send({ type: "stroke_start", id: uuid(), strokeType: "pen", brush: "ink", color: snap.you.color, width: 13, x: 10, y: 10 });
       a.send({ type: "chat", text: "w" });
       await a.wait((m) => m.type === "chat" && m.message.text === "w");
-      assert(a.msgs.filter((m) => m.type === "stroke_start").length === 2, "invalid width rejected");
+      assert(!a.msgs.some((m) => m.type === "stroke_start" && m.stroke.width === 13), "invalid width rejected");
     });
 
     await test("a stroke can be cancelled before it ends", async () => {

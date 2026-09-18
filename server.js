@@ -877,6 +877,7 @@ function handleStrokeReplace(ws, msg) {
   if (!pts.length) return;
   s.points = pts;
   if (SHAPES.has(msg.shape)) s.shape = msg.shape;
+  else delete s.shape; // 吸附后又继续画：恢复成手画的线
   broadcast(room, { type: "stroke_replace", id: s.id, points: pts, shape: s.shape });
 }
 
