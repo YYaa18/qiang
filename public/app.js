@@ -269,17 +269,18 @@ function dpr() {
   return Math.max(1, window.devicePixelRatio || 1);
 }
 
-// 把上下文平移到第 i 段，之后直接用全局坐标作画
-function tileTransform(ctx, i) {
-  const r = dpr();
-  ctx.setTransform(r, 0, 0, r, -i * SEG_W * r, 0);
+// 把上下文平移到第 i 段，之后直接用全局坐标作画。
+// res 必须是这张画布创建时的像素比：浏览器缩放会改变 devicePixelRatio，
+// 若用当前值去画旧画布，笔迹会整体缩放、挤到左上角
+function tileTransform(ctx, i, res) {
+  ctx.setTransform(res, 0, 0, res, -i * SEG_W * res, 0);
 }
 
-function makeInkCanvas(i) {
+function makeInkCanvas(i, res) {
   const c = document.createElement("canvas");
-  c.width = Math.round(SEG_W * dpr());
-  c.height = Math.round(CANVAS_H * dpr());
-  tileTransform(c.getContext("2d"), i);
+  c.width = Math.round(SEG_W * res);
+  c.height = Math.round(CANVAS_H * res);
+  tileTransform(c.getContext("2d"), i, res);
   return c;
 }
 
@@ -358,7 +359,8 @@ function syncTiles() {
     const root = document.createElement("div");
     root.className = "tile" + (i > 0 ? " seam" : "");
     root.style.left = `${i * SEG_W}px`;
-    const tile = { i, root, ink: makeInkCanvas(i), live: null, liveUsed: false, base: null, baseV: 0, baseUpTo: 0, loadingV: 0 };
+    const res = dpr();
+    const tile = { i, res, root, ink: makeInkCanvas(i, res), live: null, liveUsed: false, base: null, baseV: 0, baseUpTo: 0, loadingV: 0 };
     root.appendChild(tile.ink);
     els.tiles.appendChild(root);
     state.tiles.set(i, tile);
@@ -652,7 +654,7 @@ function rebuildInk(which) {
     off.width = tile.ink.width;
     off.height = tile.ink.height;
     const octx = off.getContext("2d");
-    tileTransform(octx, i);
+    tileTransform(octx, i, tile.res);
     paintSegment(octx, i, list, tile.base, tile.baseUpTo);
     const ctx = tile.ink.getContext("2d");
     ctx.save();
@@ -743,7 +745,7 @@ function redrawLive() {
     if (!here.length && !tile.liveUsed) continue;
     // 活动层用到时才建
     if (!tile.live) {
-      tile.live = makeInkCanvas(tile.i);
+      tile.live = makeInkCanvas(tile.i, tile.res);
       tile.root.appendChild(tile.live);
     }
     const ctx = tile.live.getContext("2d");
@@ -2864,7 +2866,13 @@ function bindUi() {
   window.addEventListener("keyup", onKeyUp);
   // 手机上地址栏收起/展开、弹出键盘都会触发 resize：保持当前缩放和看到的位置，不重新回正
   window.addEventListener("resize", () => {
-    if (!els.wall.hidden) keepView();
+    if (els.wall.hidden) return;
+    // 浏览器缩放（Ctrl/⌘ ±）会改像素比：各段画布按新像素比重建，笔迹保持清晰
+    if ([...state.tiles.values()].some((t) => t.res !== dpr())) {
+      if (state.drawing) endStroke(); // 只有真要重建画布时才收笔；地址栏伸缩这类 resize 不打断正在画的线
+      resetTiles();
+    }
+    keepView();
   });
   window.addEventListener("popstate", boot);
 }
