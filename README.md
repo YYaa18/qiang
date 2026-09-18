@@ -54,3 +54,7 @@ docs/              PRD 与开发任务
 ## 部署
 
 本机 + 内网穿透，或者 VPS（Caddy + systemd + 每日备份），见 [deploy/README.md](deploy/README.md)。
+
+## 许可证
+
+[MIT](LICENSE)

@@ -140,10 +140,20 @@ const state = {
   arrivedAt: new Map(),
 };
 
+// crypto.randomUUID 只在 HTTPS / localhost 下可用；用 http://IP 访问时自己拼一个 v4 UUID
+function uuid() {
+  if (window.crypto && typeof crypto.randomUUID === "function") return crypto.randomUUID();
+  const b = crypto.getRandomValues(new Uint8Array(16));
+  b[6] = (b[6] & 0x0f) | 0x40;
+  b[8] = (b[8] & 0x3f) | 0x80;
+  const h = [...b].map((x) => x.toString(16).padStart(2, "0")).join("");
+  return `${h.slice(0, 8)}-${h.slice(8, 12)}-${h.slice(12, 16)}-${h.slice(16, 20)}-${h.slice(20)}`;
+}
+
 function getClientId() {
   let id = localStorage.getItem(STORAGE_ID);
   if (!id) {
-    id = crypto.randomUUID();
+    id = uuid();
     localStorage.setItem(STORAGE_ID, id);
   }
   return id;
@@ -675,7 +685,7 @@ function canDraw() {
 
 function startStroke(p) {
   if (!canDraw()) return;
-  const id = crypto.randomUUID();
+  const id = uuid();
   const stroke = {
     id,
     seq: 1e12,
@@ -744,7 +754,7 @@ function commitText() {
   const y = Number(els.textBox.dataset.y);
   cancelText();
   if (!text || !canDraw()) return;
-  const id = crypto.randomUUID();
+  const id = uuid();
   const stroke = {
     id,
     seq: Date.now(),
@@ -1845,7 +1855,15 @@ function bindUi() {
       await navigator.clipboard.writeText(url);
       toast("已复制链接");
     } catch {
-      toast(url);
+      // http://IP 访问时没有 clipboard API，退回老办法
+      const ta = document.createElement("textarea");
+      ta.value = url;
+      ta.style.cssText = "position:fixed;opacity:0";
+      document.body.appendChild(ta);
+      ta.select();
+      const ok = document.execCommand("copy");
+      ta.remove();
+      toast(ok ? "已复制链接" : url);
     }
   });
   els.menuBtn.addEventListener("click", (e) => {
