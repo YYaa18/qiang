@@ -93,6 +93,7 @@ const els = {
   overlayBack: $("overlay-back"),
   toast: $("toast"),
   tip: $("tip"),
+  arrivals: $("arrivals"),
 };
 
 const state = {
@@ -132,6 +133,8 @@ const state = {
   chatOpen: true,
   unread: 0,
   custom: null, // 最近一次用的自定义色，工具条上留一格方便切回
+  knownIds: new Set(), // 已在墙上的人，用来判断谁是新来的
+  arrivedAt: new Map(),
 };
 
 function getClientId() {
@@ -675,6 +678,7 @@ function upsertStroke(stroke) {
 function applySnapshot(snap) {
   state.code = snap.code;
   state.users = snap.users || [];
+  state.knownIds = new Set(state.users.map((u) => u.id));
   state.strokes = snap.strokes || [];
   state.chat = snap.chat || [];
   state.locked = !!snap.locked;
@@ -868,6 +872,8 @@ function renderRoster() {
     const seat = document.createElement("div");
     const me = state.you && u.id === state.you.id;
     seat.className = "seat" + (me ? " me" : "") + (u.online === false ? " away" : "");
+    seat.style.setProperty("--c", u.color);
+    if (Date.now() - (state.arrivedAt.get(u.id) || 0) < 1600) seat.classList.add("arrived");
     const dot = document.createElement("span");
     dot.className = "pdot";
     dot.style.background = u.color;
@@ -1111,11 +1117,29 @@ function onMessage(msg) {
       state.allowReconnect = false;
       goLobby(msg.message || "你被请离了这面墙");
       break;
-    case "presence":
+    case "presence": {
+      const before = state.users;
       state.users = msg.users || [];
+      // 名单里第一次出现的人才算「来了」；宽限期内重连的人一直在名单上，不会重复提示
+      const fresh = state.users.filter(
+        (u) => !state.knownIds.has(u.id) && !(state.you && u.id === state.you.id)
+      );
+      state.knownIds = new Set(state.users.map((u) => u.id));
+      for (const u of fresh) state.arrivedAt.set(u.id, Date.now());
+      // 宽限期（10 秒）过后才会从名单里消失，所以刷新页面不会被当成「走了」
+      const gone = before.filter((u) => !state.knownIds.has(u.id));
       pruneCursors();
       renderRoster();
+      for (const u of fresh) showPresenceToast(u, "来了");
+      for (const u of gone) showPresenceToast(u, "走了", true);
       break;
+    }
+    case "kick": {
+      // 服务端先发名单再发 kick：把刚弹出的「走了」改成「被请离了」
+      const el = presenceToasts.get(msg.targetId);
+      if (el) el.lastChild.textContent = "被请离了";
+      break;
+    }
     case "stroke_start": {
       const s = msg.stroke;
       if (!s) break;
@@ -1257,6 +1281,31 @@ function pruneCursors() {
     state.othersCursors.delete(id);
     el.remove();
   }
+}
+
+// 精简的进出提示：名字 来了 / 走了，最多叠 3 条，2.5 秒后淡出
+const presenceToasts = new Map();
+
+function showPresenceToast(u, text, leave = false) {
+  const el = document.createElement("div");
+  el.className = "arrival" + (leave ? " leave" : "");
+  el.style.setProperty("--c", u.color);
+  const name = document.createElement("b");
+  name.style.color = textColor(u.color);
+  name.textContent = u.name;
+  const verb = document.createElement("span");
+  verb.textContent = text;
+  el.append(name, verb);
+  els.arrivals.appendChild(el);
+  presenceToasts.set(u.id, el);
+  while (els.arrivals.childElementCount > 3) els.arrivals.firstElementChild.remove();
+  setTimeout(() => {
+    el.classList.add("out");
+    setTimeout(() => {
+      el.remove();
+      if (presenceToasts.get(u.id) === el) presenceToasts.delete(u.id);
+    }, 320);
+  }, 2500);
 }
 
 function startClearUi(deadline) {
