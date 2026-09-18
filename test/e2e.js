@@ -515,6 +515,37 @@ async function main() {
       assert(!a.msgs.some((m) => m.type === "stroke_start" && m.stroke.id !== ok), "invalid colors rejected");
     });
 
+    await test("brushes, pen pressure, shapes and replacing a stroke", async () => {
+      const hostId = uuid();
+      const code = await createRoom(port, hostId);
+      const a = track(await join(port, { code, name: "甲", clientId: hostId }));
+      const snap = await a.wait("snapshot");
+      const b = track(await join(port, { code, name: "乙", clientId: uuid() }));
+      await b.wait("snapshot");
+      const id = uuid();
+      a.send({ type: "stroke_start", id, strokeType: "pen", brush: "ink", color: snap.you.color, width: 14, x: 10, y: 10, p: 0.42 });
+      const st = await b.wait((m) => m.type === "stroke_start" && m.stroke.id === id);
+      assert(st.stroke.brush === "ink" && st.stroke.points[0].p === 0.42, "brush and pressure kept");
+      a.send({ type: "stroke_point", id, points: [{ x: 50, y: 60, p: 0.9 }, { x: 80, y: 90, p: 7 }, { x: 90, y: 95 }] });
+      const pt = await b.wait((m) => m.type === "stroke_point" && m.id === id);
+      assert(pt.points[0].p === 0.9 && pt.points[1].p === undefined && pt.points[2].p === undefined, "bad pressure dropped");
+      a.send({ type: "stroke_replace", id, shape: "ellipse", points: [{ x: 0, y: 0 }, { x: 100, y: 0 }, { x: 100, y: 100 }] });
+      const rp = await b.wait("stroke_replace");
+      assert(rp.shape === "ellipse" && rp.points.length === 3, "replace broadcast");
+      a.send({ type: "stroke_end", id });
+      const end = await b.wait((m) => m.type === "stroke_end" && m.id === id);
+      assert(end.stroke.shape === "ellipse" && end.stroke.points.length === 3, "replaced points land");
+
+      const id2 = uuid();
+      a.send({ type: "stroke_start", id: id2, strokeType: "pen", brush: "glitter", shape: "star", color: snap.you.color, width: 24, x: 10, y: 10 });
+      const st2 = await b.wait((m) => m.type === "stroke_start" && m.stroke.id === id2);
+      assert(st2.stroke.brush === undefined && st2.stroke.shape === undefined, "unknown brush/shape ignored");
+      a.send({ type: "stroke_start", id: uuid(), strokeType: "pen", brush: "ink", color: snap.you.color, width: 13, x: 10, y: 10 });
+      a.send({ type: "chat", text: "w" });
+      await a.wait((m) => m.type === "chat" && m.message.text === "w");
+      assert(a.msgs.filter((m) => m.type === "stroke_start").length === 2, "invalid width rejected");
+    });
+
     await test("a stroke can be cancelled before it ends", async () => {
       const hostId = uuid();
       const code = await createRoom(port, hostId);

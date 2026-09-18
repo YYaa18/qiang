@@ -14,8 +14,12 @@ const PUBLIC_DIR = path.join(__dirname, "public");
 
 const CODE_CHARS = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
 const PALETTE = ["#C43C3C", "#3B5BDB", "#2F9E44", "#E67700"];
-const PEN_WIDTHS = [3, 8, 18];
-const ERASER_WIDTHS = [8, 18, 36];
+// 5 档粗细；3、18 是旧版的档位，没刷新的旧页面还会发过来
+const PEN_WIDTHS = new Set([2, 4, 8, 14, 24, 3, 18]);
+const ERASER_WIDTHS = new Set([8, 14, 24, 36, 56, 18]);
+const BRUSHES = new Set(["pen", "ink", "marker", "pencil"]);
+const SHAPES = new Set(["line", "rect", "ellipse"]);
+const MAX_POINTS = 5000;
 const MAX_USERS = 4;
 const GRACE_MS = 10_000;
 const CHAT_MAX = 100;
@@ -184,6 +188,13 @@ function clipPoint(room, x, y, margin = 0) {
     x: Math.round(Math.max(-margin, Math.min(wallWidth(room) + margin, nx)) * 10) / 10,
     y: Math.round(Math.max(-margin, Math.min(CANVAS_H + margin, ny)) * 10) / 10,
   };
+}
+
+// 手写笔的压力（0～1，两位小数）跟着点走；鼠标和手指没有压力，不带
+function withPressure(pt, raw) {
+  const pr = raw && Number(raw.p);
+  if (pt && Number.isFinite(pr) && pr >= 0 && pr <= 1) pt.p = Math.round(pr * 100) / 100;
+  return pt;
 }
 
 function asPoint(room, p, margin = 0) {
@@ -473,7 +484,7 @@ function segsOf(room, s) {
       if (p.x < x0) x0 = p.x;
       if (p.x > x1) x1 = p.x;
     }
-    const h = (s.width || 0) / 2 + 1;
+    const h = (s.width || 0) * 0.8 + 1; // 笔锋、马克笔会比标称粗细更宽
     x0 -= h;
     x1 += h;
   }
@@ -786,8 +797,8 @@ function handleStrokeStart(ws, msg) {
   if (strokeType === "pen" && !color) return;
   const width = Number(msg.width);
   const widths = strokeType === "eraser" ? ERASER_WIDTHS : PEN_WIDTHS;
-  if (!widths.includes(width)) return;
-  const p = asPoint(room, { x: msg.x, y: msg.y }) || asPoint(room, msg.point);
+  if (!widths.has(width)) return;
+  const p = withPressure(asPoint(room, { x: msg.x, y: msg.y }) || asPoint(room, msg.point), msg);
   if (!p) return;
   finishOpenStrokes(room, user.id);
   const stroke = {
@@ -801,6 +812,10 @@ function handleStrokeStart(ws, msg) {
     hidden: false,
     t: Date.now(),
   };
+  // 新版笔画带笔刷（圆珠笔/笔锋/马克笔/铅笔）和形状；没有这两个字段的是旧笔画，照旧画法
+  if (strokeType === "pen" && BRUSHES.has(msg.brush)) stroke.brush = msg.brush;
+  if (strokeType === "eraser" && msg.brush) stroke.brush = "pen";
+  if (SHAPES.has(msg.shape)) stroke.shape = msg.shape;
   room.open.set(stroke.id, stroke);
   const st = ensureStack(room, user.id);
   st.redo = [];
@@ -825,7 +840,8 @@ function handleStrokePoint(ws, msg) {
   const raw = Array.isArray(msg.points) ? msg.points : [msg];
   const pts = [];
   for (const item of raw) {
-    const p = asPoint(room, item, STROKE_MARGIN);
+    if (s.points.length >= MAX_POINTS) break;
+    const p = withPressure(asPoint(room, item, STROKE_MARGIN), item);
     if (p) {
       s.points.push(p);
       pts.push(p);
@@ -846,6 +862,24 @@ function handleStrokeEnd(ws, msg) {
 }
 
 // 触屏上第二根手指落下时撤回刚起笔的那一笔：还没落定，直接丢掉
+// 画完停住吸附成标准形状（直线/矩形/椭圆）：还没落定的这一笔整条换掉
+function handleStrokeReplace(ws, msg) {
+  const ctx = ctxOf(ws);
+  if (!ctx) return;
+  const { room, user } = ctx;
+  const s = room.open.get(msg.id);
+  if (!s || s.userId !== user.id || !Array.isArray(msg.points)) return;
+  const pts = [];
+  for (const item of msg.points.slice(0, MAX_POINTS)) {
+    const p = withPressure(asPoint(room, item, STROKE_MARGIN), item);
+    if (p) pts.push(p);
+  }
+  if (!pts.length) return;
+  s.points = pts;
+  if (SHAPES.has(msg.shape)) s.shape = msg.shape;
+  broadcast(room, { type: "stroke_replace", id: s.id, points: pts, shape: s.shape });
+}
+
 function handleStrokeCancel(ws, msg) {
   const ctx = ctxOf(ws);
   if (!ctx) return;
@@ -1167,6 +1201,9 @@ function handleMessage(ws, raw) {
       break;
     case "stroke_end":
       handleStrokeEnd(ws, msg);
+      break;
+    case "stroke_replace":
+      handleStrokeReplace(ws, msg);
       break;
     case "stroke_cancel":
       handleStrokeCancel(ws, msg);

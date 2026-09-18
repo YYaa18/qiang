@@ -9,8 +9,24 @@ const PAD = 24; // 视图四周留白（屏幕像素）
 const EXTEND_GAP = 40; // 纸右缘到「接一段」按钮的距离（画布单位）
 const EXTEND_W = 140;
 const TEXT_FONT = '22px "PingFang SC","Microsoft YaHei",sans-serif';
-const PEN_WIDTHS = [3, 8, 18];
-const ERASER_WIDTHS = [8, 18, 36];
+const PEN_WIDTHS = [2, 4, 8, 14, 24];
+const ERASER_WIDTHS = [8, 14, 24, 36, 56];
+const BRUSHES = [
+  { id: "ink", name: "笔锋", desc: "起收笔带尖，慢粗快细" },
+  { id: "pen", name: "圆珠笔", desc: "粗细均匀" },
+  { id: "marker", name: "马克笔", desc: "半透明，叠加处变深" },
+  { id: "pencil", name: "铅笔", desc: "带颗粒感" },
+];
+const BRUSH_ICONS = {
+  ink: '<svg viewBox="0 0 24 24"><path d="M12 3l5 9-5 9-5-9z M12 12v9" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round"/><circle cx="12" cy="11" r="1.4" fill="currentColor"/></svg>',
+  pen: '<svg viewBox="0 0 24 24"><path d="M4 20l1.2-4.2L16.8 4.2a2 2 0 0 1 2.8 0l.2.2a2 2 0 0 1 0 2.8L8.2 18.8z" fill="none" stroke="currentColor" stroke-width="1.7"/></svg>',
+  marker: '<svg viewBox="0 0 24 24"><path d="M14 4l6 6-8 8H8v-4z M4 20h8" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round"/><path d="M9 15l3 3" stroke="currentColor" stroke-width="1.7"/></svg>',
+  pencil: '<svg viewBox="0 0 24 24"><path d="M5 19l1-5L16 4l4 4-10 10z M14.5 5.5l4 4 M5 19l3.5-1" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round"/></svg>',
+};
+// 防抖：笔尖被一根看不见的「绳子」拖着走，绳长以内的晃动不会带动笔尖（单位：屏幕像素）
+const STAB_RADIUS = [0, 7, 16];
+const STAB_NAMES = ["关", "轻", "强"];
+const SNAP_HOLD_MS = 550; // 画完停住这么久，尝试吸附成标准形状
 const NEUTRALS = ["#1A1A1A", "#FFFFFF", "#868E96"];
 // 主色用于色点和笔迹；写成文字时换成更深一档，保证在浅底上可读（对比度 ≥ 4.5）
 const TEXT_COLOR = {
@@ -37,6 +53,23 @@ const STORAGE_NAME = "qiang.name";
 const STROKE_MARGIN = 40;
 
 const $ = (id) => document.getElementById(id);
+
+function readPref(key, fallback, ok) {
+  try {
+    const v = localStorage.getItem(key);
+    return v !== null && ok(v) ? v : fallback;
+  } catch {
+    return fallback;
+  }
+}
+
+function writePref(key, value) {
+  try {
+    localStorage.setItem(key, String(value));
+  } catch {
+    /* 存不了就算了 */
+  }
+}
 
 const els = {
   lobby: $("lobby"),
@@ -98,6 +131,12 @@ const els = {
   overlayText: $("overlay-text"),
   overlayBack: $("overlay-back"),
   toast: $("toast"),
+  penBtn: $("btn-pen"),
+  penIcon: $("pen-icon"),
+  stabBtn: $("btn-stab"),
+  stabLabel: $("stab-label"),
+  brushes: $("brushes"),
+  brushList: $("brush-list"),
   leave: $("btn-leave"),
   chatMobile: $("btn-chat-mobile"),
   unreadM: $("unread-m"),
@@ -119,7 +158,9 @@ const state = {
   canUndo: false,
   canRedo: false,
   tool: "pen",
-  size: 1,
+  size: 2,
+  brush: readPref("qiang.brush", "ink", (v) => BRUSHES.some((b) => b.id === v)),
+  stab: Number(readPref("qiang.stab", "1", (v) => ["0", "1", "2"].includes(v))),
   color: null,
   scale: 1,
   segments: 1,
@@ -341,7 +382,7 @@ function strokeBox(s) {
     if (p.x < x0) x0 = p.x;
     if (p.x > x1) x1 = p.x;
   }
-  const h = (s.width || 0) / 2 + 1;
+  const h = (s.width || 0) * 0.8 + 1; // 笔锋最粗处约是标称粗细的 1.5 倍
   return { x0: x0 - h, x1: x1 + h };
 }
 
@@ -380,8 +421,8 @@ function drawStroke(ctx, s) {
     ctx.restore();
     return;
   }
-  const pts = s.points || [];
-  if (!pts.length) return;
+  const raw = s.points || [];
+  if (!raw.length) return;
   ctx.save();
   if (s.type === "eraser") {
     ctx.globalCompositeOperation = "destination-out";
@@ -394,25 +435,193 @@ function drawStroke(ctx, s) {
   }
   ctx.lineCap = "round";
   ctx.lineJoin = "round";
-  ctx.lineWidth = s.width;
+  if (!s.brush) {
+    // 旧笔画：原来的画法，不动
+    ctx.lineWidth = s.width;
+    strokeCurve(ctx, raw, s.width);
+  } else {
+    const geo = strokeGeometry(s);
+    const closedShape = s.shape === "rect" || s.shape === "ellipse";
+    if (s.type === "eraser" || s.brush === "pen" || (s.brush === "ink" && closedShape)) {
+      ctx.lineWidth = s.width;
+      strokeCurve(ctx, geo.pts, s.width, s.shape);
+    } else if (s.brush === "ink") {
+      ctx.fill(geo.ink);
+    } else if (s.brush === "marker") {
+      // 同一次 stroke() 里自己和自己重叠的地方只上一次色，不会越描越深；不同笔之间叠加才加深
+      ctx.globalAlpha = 0.42;
+      ctx.lineWidth = s.width * 1.5;
+      ctx.lineCap = "square";
+      strokeCurve(ctx, geo.pts, s.width * 1.5, s.shape);
+    } else if (s.brush === "pencil") {
+      ctx.globalAlpha = 0.92;
+      ctx.strokeStyle = pencilPattern(s.color);
+      ctx.fillStyle = ctx.strokeStyle;
+      ctx.lineWidth = Math.max(1.5, s.width * 0.7);
+      strokeCurve(ctx, geo.pts, ctx.lineWidth, s.shape);
+    }
+  }
+  ctx.restore();
+}
+
+// 等粗描线：一个点画圆点；标准形状用直线段；其余过中点画二次曲线
+function strokeCurve(ctx, pts, width, shape) {
   if (pts.length === 1) {
     ctx.beginPath();
-    ctx.arc(pts[0].x, pts[0].y, s.width / 2, 0, Math.PI * 2);
+    ctx.arc(pts[0].x, pts[0].y, width / 2, 0, Math.PI * 2);
     ctx.fill();
+    return;
+  }
+  ctx.beginPath();
+  ctx.moveTo(pts[0].x, pts[0].y);
+  if (shape) {
+    for (let i = 1; i < pts.length; i++) ctx.lineTo(pts[i].x, pts[i].y);
   } else {
-    // 过相邻两点的中点画二次曲线，折线变圆滑；首尾仍落在真实的点上
-    ctx.beginPath();
-    ctx.moveTo(pts[0].x, pts[0].y);
     for (let i = 1; i < pts.length - 1; i++) {
-      const mx = (pts[i].x + pts[i + 1].x) / 2;
-      const my = (pts[i].y + pts[i + 1].y) / 2;
-      ctx.quadraticCurveTo(pts[i].x, pts[i].y, mx, my);
+      ctx.quadraticCurveTo(pts[i].x, pts[i].y, (pts[i].x + pts[i + 1].x) / 2, (pts[i].y + pts[i + 1].y) / 2);
     }
     const end = pts[pts.length - 1];
     ctx.lineTo(end.x, end.y);
-    ctx.stroke();
   }
-  ctx.restore();
+  ctx.stroke();
+}
+
+// ───────────── 笔刷几何：自动修整 + 笔锋 ─────────────
+//
+// 全部由点算出来、没有随机数：每台设备、导出、冻结的墨迹图画出来都一样。
+
+// 落定的笔不会再变，几何结果缓存起来；正在画的笔按点数判断要不要重算
+const geoCache = new WeakMap();
+function strokeGeometry(s) {
+  const c = geoCache.get(s);
+  if (c && c.src === s.points && c.n === s.points.length) return c;
+  const src = s.points;
+  let pts;
+  if (s.shape === "line") pts = withSimPressure(resample(src, Math.max(2, s.width / 2)), s.width); // 两个端点不够收笔锋，先补点
+  else if (s.shape) pts = withSimPressure(src, s.width);
+  else pts = chaikin(withSimPressure(src, s.width), 2);
+  const geo = { src, n: src.length, pts, ink: null };
+  if (s.brush === "ink" && !(s.shape === "rect" || s.shape === "ellipse")) geo.ink = inkPath(pts, s.width);
+  geoCache.set(s, geo);
+  return geo;
+}
+
+// 沿折线每隔 step 取一个点
+function resample(pts, step) {
+  const out = [pts[0]];
+  for (let i = 1; i < pts.length; i++) {
+    const a = pts[i - 1];
+    const b = pts[i];
+    const d = Math.hypot(b.x - a.x, b.y - a.y);
+    for (let t = step; t < d; t += step) out.push({ x: a.x + ((b.x - a.x) * t) / d, y: a.y + ((b.y - a.y) * t) / d });
+    out.push(b);
+  }
+  return out;
+}
+
+// 自动修整：Chaikin 切角，每轮把折线的角磨圆一次，首尾点不动
+function chaikin(pts, rounds) {
+  let a = pts;
+  for (let k = 0; k < rounds && a.length > 2; k++) {
+    const out = [a[0]];
+    for (let i = 0; i < a.length - 1; i++) {
+      out.push(lerpPoint(a[i], a[i + 1], 0.25), lerpPoint(a[i], a[i + 1], 0.75));
+    }
+    out.push(a[a.length - 1]);
+    a = out;
+  }
+  return a;
+}
+
+function lerpPoint(p, q, t) {
+  return { x: p.x + (q.x - p.x) * t, y: p.y + (q.y - p.y) * t, p: p.p + (q.p - p.p) * t };
+}
+
+// 压力：手写笔用真实压力；鼠标和手指按速度模拟——移动得慢压力大（粗），快则压力小（细）
+function withSimPressure(pts, size) {
+  const real = pts.some((p) => typeof p.p === "number");
+  let pr = 0.5;
+  return pts.map((p, i) => {
+    if (real) {
+      if (typeof p.p === "number") pr = p.p;
+    } else if (i > 0) {
+      const sp = Math.min(1, Math.hypot(p.x - pts[i - 1].x, p.y - pts[i - 1].y) / size);
+      pr = Math.min(1, pr + (1 - sp - pr) * sp * 0.35);
+    }
+    return { x: p.x, y: p.y, p: pr };
+  });
+}
+
+// 笔锋：沿线两侧按压力偏移出轮廓，首尾各收一段尖，最后填充成一个形状
+function inkPath(pts, size) {
+  const path = new Path2D();
+  const n = pts.length;
+  const dist = [0];
+  for (let i = 1; i < n; i++) dist.push(dist[i - 1] + Math.hypot(pts[i].x - pts[i - 1].x, pts[i].y - pts[i - 1].y));
+  const total = dist[n - 1];
+  if (n < 2 || total < size * 0.3) {
+    path.arc(pts[0].x, pts[0].y, size * 0.5, 0, Math.PI * 2);
+    return path;
+  }
+  const taper = Math.min(size * 3, total * 0.3);
+  const ease = (t) => 1 - (1 - t) * (1 - t);
+  const left = [];
+  const right = [];
+  for (let i = 0; i < n; i++) {
+    const a = pts[Math.max(0, i - 1)];
+    const b = pts[Math.min(n - 1, i + 1)];
+    let dx = b.x - a.x;
+    let dy = b.y - a.y;
+    const len = Math.hypot(dx, dy) || 1;
+    dx /= len;
+    dy /= len;
+    const t = Math.min(ease(Math.min(1, dist[i] / taper)), ease(Math.min(1, (total - dist[i]) / taper)));
+    const r = Math.max(0.35, size * (0.5 - 0.5 * (0.5 - pts[i].p)) * t);
+    left.push({ x: pts[i].x - dy * r, y: pts[i].y + dx * r });
+    right.push({ x: pts[i].x + dy * r, y: pts[i].y - dx * r });
+  }
+  const trace = (arr, first) => {
+    if (first) path.moveTo(arr[0].x, arr[0].y);
+    else path.lineTo(arr[0].x, arr[0].y);
+    for (let i = 1; i < arr.length - 1; i++) {
+      path.quadraticCurveTo(arr[i].x, arr[i].y, (arr[i].x + arr[i + 1].x) / 2, (arr[i].y + arr[i + 1].y) / 2);
+    }
+    path.lineTo(arr[arr.length - 1].x, arr[arr.length - 1].y);
+  };
+  trace(left, true);
+  trace(right.reverse(), false);
+  path.closePath();
+  return path;
+}
+
+// 铅笔：用固定种子生成的颗粒图案当颜色，每台设备纹理一致；按颜色缓存
+const pencilCache = new Map();
+function pencilPattern(color) {
+  let pat = pencilCache.get(color);
+  if (pat) return pat;
+  const size = 48;
+  const c = document.createElement("canvas");
+  c.width = size;
+  c.height = size;
+  const g = c.getContext("2d");
+  const img = g.createImageData(size, size);
+  const hex = color.replace("#", "");
+  const [r, gr, b] = [0, 2, 4].map((k) => parseInt(hex.slice(k, k + 2), 16));
+  let seed = 20260919;
+  const rnd = () => {
+    seed = (seed * 1664525 + 1013904223) >>> 0;
+    return seed / 4294967296;
+  };
+  for (let i = 0; i < img.data.length; i += 4) {
+    img.data[i] = r;
+    img.data[i + 1] = gr;
+    img.data[i + 2] = b;
+    img.data[i + 3] = rnd() < 0.72 ? 150 + rnd() * 105 : rnd() * 60;
+  }
+  g.putImageData(img, 0, 0);
+  pat = g.createPattern(c, "repeat");
+  pencilCache.set(color, pat);
+  return pat;
 }
 
 function sortedStrokes() {
@@ -702,8 +911,11 @@ function canDraw() {
 // 手指落下后这么久内来了第二根手指，就当作双指手势：这一笔撤回，不发出去
 const TOUCH_GRACE_MS = 120;
 
-function startStroke(p, pending = false) {
+function startStroke(p, pending = false, opts = {}) {
   if (!canDraw()) return;
+  state.brushPos = { x: p.x, y: p.y };
+  state.lastRaw = p;
+  state.holdAt = null;
   const stroke = {
     id: uuid(),
     seq: 1e12,
@@ -715,18 +927,32 @@ function startStroke(p, pending = false) {
     hidden: false,
     t: Date.now(),
     pending,
+    brush: state.tool === "eraser" ? "pen" : state.brush,
+    shape: opts.shape,
   };
   state.current = stroke;
   state.drawing = true;
   state.pointBuf = [];
-  if (pending) state.pendingTimer = setTimeout(commitPending, TOUCH_GRACE_MS);
-  else sendStart(stroke);
+  // Shift 直线要等松手才定下来，不设超时；触屏的一笔等 120ms 看有没有第二根手指
+  if (pending && !opts.shape) state.pendingTimer = setTimeout(commitPending, TOUCH_GRACE_MS);
+  else if (!pending) sendStart(stroke);
   redrawLive();
 }
 
 function sendStart(stroke) {
   const [p] = stroke.points;
-  send({ type: "stroke_start", id: stroke.id, strokeType: stroke.type, color: stroke.color, width: stroke.width, x: p.x, y: p.y });
+  send({
+    type: "stroke_start",
+    id: stroke.id,
+    strokeType: stroke.type,
+    brush: stroke.brush,
+    shape: stroke.shape,
+    color: stroke.color,
+    width: stroke.width,
+    x: p.x,
+    y: p.y,
+    p: p.p,
+  });
 }
 
 // 触屏的一笔过了等待期还是单指：正式发出去，把攒下的点一并补上
@@ -742,6 +968,7 @@ function commitPending() {
 
 function cancelStroke() {
   clearTimeout(state.pendingTimer);
+  clearTimeout(state.snapTimer);
   // 已经发出去的也撤回：服务端丢掉这笔，别人那边的预览也会消失
   if (state.current && !state.current.pending) send({ type: "stroke_cancel", id: state.current.id });
   state.current = null;
@@ -750,10 +977,138 @@ function cancelStroke() {
   redrawLive();
 }
 
+// 原始采样点进来：Shift 直线只保留首尾；其余先过防抖，再记进这一笔
+function onRawPoints(raws) {
+  const s = state.current;
+  if (!state.drawing || !s || !raws.length) return;
+  state.lastRaw = raws[raws.length - 1];
+  if (s.snapped) return; // 已经吸附成形状，松手前不再改
+  if (s.shape === "line") {
+    s.points = [s.points[0], state.lastRaw];
+    scheduleLive();
+    return;
+  }
+  armSnap(state.lastRaw);
+  addPoints(stabilize(raws));
+}
+
+// 拉绳防抖：笔尖离指针超过绳长才被拖动，拖到正好绳长的位置
+function stabilize(raws) {
+  const R = STAB_RADIUS[state.stab] / state.scale;
+  if (!R) return raws;
+  const out = [];
+  let b = state.brushPos;
+  for (const q of raws) {
+    const d = Math.hypot(q.x - b.x, q.y - b.y);
+    if (d <= R) continue;
+    const k = (d - R) / d;
+    b = { x: b.x + (q.x - b.x) * k, y: b.y + (q.y - b.y) * k };
+    if (typeof q.p === "number") b.p = q.p;
+    out.push(b);
+  }
+  state.brushPos = b;
+  return out;
+}
+
+// 停住计时：指针在 3 个屏幕像素内不动满 SNAP_HOLD_MS，就试着吸附成形状
+// 手指压在屏幕上会自然抖几个像素，「算停住」的范围按输入方式放宽
+const HOLD_SLOP = { mouse: 3, pen: 6, touch: 14 };
+
+function armSnap(q) {
+  const a = state.holdAt;
+  const slop = HOLD_SLOP[state.inputType] || 3;
+  if (a && Math.hypot(q.x - a.x, q.y - a.y) * state.scale < slop) return;
+  state.holdAt = q;
+  clearTimeout(state.snapTimer);
+  state.snapTimer = setTimeout(trySnap, SNAP_HOLD_MS);
+}
+
+const SHAPE_NAMES = { line: "直线", rect: "矩形", ellipse: "椭圆", circle: "圆" };
+
+function trySnap() {
+  const s = state.current;
+  if (!state.drawing || !s || s.snapped || s.shape || s.type === "eraser") return;
+  const shape = recognizeShape(s.points);
+  if (!shape) return;
+  s.points = shape.points;
+  s.shape = shape.kind;
+  s.snapped = true;
+  state.pointBuf = [];
+  if (!s.pending) send({ type: "stroke_replace", id: s.id, points: s.points, shape: s.shape });
+  scheduleLive();
+  toast(`已吸附成${SHAPE_NAMES[shape.name]}`, 1200);
+}
+
+// 认形状：先看是不是直线；首尾相接的再比椭圆和矩形哪个更贴
+function recognizeShape(pts) {
+  if (pts.length < 6) return null;
+  const a = pts[0];
+  const z = pts[pts.length - 1];
+  let len = 0;
+  let minX = Infinity;
+  let minY = Infinity;
+  let maxX = -Infinity;
+  let maxY = -Infinity;
+  pts.forEach((p, i) => {
+    if (i) len += Math.hypot(p.x - pts[i - 1].x, p.y - pts[i - 1].y);
+    minX = Math.min(minX, p.x);
+    maxX = Math.max(maxX, p.x);
+    minY = Math.min(minY, p.y);
+    maxY = Math.max(maxY, p.y);
+  });
+  const w = maxX - minX;
+  const h = maxY - minY;
+  const big = Math.max(w, h);
+  if (big * state.scale < 24) return null; // 太小的不认，免得写字时被吸走
+  const gap = Math.hypot(z.x - a.x, z.y - a.y);
+  if (gap > big * 0.7) {
+    let dev = 0;
+    for (const p of pts) dev = Math.max(dev, Math.abs((z.x - a.x) * (p.y - a.y) - (z.y - a.y) * (p.x - a.x)) / gap);
+    if (dev < Math.max(4 / state.scale, gap * 0.05) && len < gap * 1.15) {
+      return { kind: "line", name: "line", points: [{ x: a.x, y: a.y }, { x: z.x, y: z.y }] };
+    }
+    return null;
+  }
+  if (gap > big * 0.3 || len < (w + h) * 1.4 || Math.min(w, h) < big * 0.15) return null;
+  const cx = (minX + maxX) / 2;
+  const cy = (minY + maxY) / 2;
+  const rx = w / 2;
+  const ry = h / 2;
+  let eErr = 0;
+  let rErr = 0;
+  for (const p of pts) {
+    eErr += Math.abs(Math.hypot((p.x - cx) / rx, (p.y - cy) / ry) - 1);
+    rErr += Math.min(Math.abs(p.x - minX), Math.abs(p.x - maxX), Math.abs(p.y - minY), Math.abs(p.y - maxY)) / big;
+  }
+  eErr /= pts.length;
+  rErr /= pts.length;
+  const corners = [[minX, minY], [maxX, minY], [maxX, maxY], [minX, maxY]].every(([x, y]) =>
+    pts.some((p) => Math.hypot(p.x - x, p.y - y) < big * 0.18)
+  );
+  if (corners && rErr < 0.05 && rErr * 2 < eErr) {
+    return {
+      kind: "rect",
+      name: "rect",
+      points: [{ x: minX, y: minY }, { x: maxX, y: minY }, { x: maxX, y: maxY }, { x: minX, y: maxY }, { x: minX, y: minY }],
+    };
+  }
+  if (eErr < 0.13) {
+    const round = Math.abs(rx - ry) < Math.max(rx, ry) * 0.12;
+    const [ex, ey] = round ? [(rx + ry) / 2, (rx + ry) / 2] : [rx, ry];
+    const out = [];
+    for (let i = 0; i <= 72; i++) {
+      const t = (i / 72) * Math.PI * 2;
+      out.push({ x: cx + ex * Math.cos(t), y: cy + ey * Math.sin(t) });
+    }
+    return { kind: "ellipse", name: round ? "circle" : "ellipse", points: out };
+  }
+  return null;
+}
+
 // 一次事件可能带来多个采样点（getCoalescedEvents）；太近的点丢掉，重绘合并到下一帧
 function addPoints(pts) {
   const s = state.current;
-  if (!state.drawing || !s) return;
+  if (!state.drawing || !s || s.snapped) return;
   const minD = 0.75 / state.scale; // 屏幕上不到 0.75 像素的移动不记
   let last = s.points[s.points.length - 1];
   for (const p of pts) {
@@ -786,7 +1141,11 @@ function endStroke() {
     state.drawing = false;
     return;
   }
-  if (state.current.pending) commitPending(); // 轻点一下也算一笔（一个点）
+  clearTimeout(state.snapTimer);
+  const cur = state.current;
+  // 防抖让笔尖落后于指针；松手时补到指针所在处，线条停在你松手的地方
+  if (state.stab && !cur.snapped && !cur.shape && state.lastRaw) addPoints([state.lastRaw]);
+  if (cur.pending) commitPending(); // 轻点一下也算一笔（一个点）
   flushPoints();
   send({ type: "stroke_end", id: state.current.id });
   const done = state.current;
@@ -894,6 +1253,13 @@ function renderTools() {
   els.toolbar.querySelectorAll(".tool").forEach((btn) => {
     btn.classList.toggle("active", btn.dataset.tool === state.tool);
   });
+  const brush = BRUSHES.find((b) => b.id === state.brush);
+  els.penIcon.innerHTML = BRUSH_ICONS[state.brush];
+  els.penBtn.dataset.tip = brush.name;
+  els.penBtn.setAttribute("aria-label", `笔：${brush.name}`);
+  els.stabLabel.textContent = STAB_NAMES[state.stab];
+  els.stabBtn.classList.toggle("off", state.stab === 0);
+  els.stabBtn.dataset.desc = `鼠标画线更稳：${STAB_NAMES.map((n, i) => (i === state.stab ? `[${n}]` : n)).join(" / ")}，点击切换`;
   els.toolbar.querySelectorAll(".width-btn").forEach((btn) => {
     btn.classList.toggle("active", Number(btn.dataset.size) === state.size);
   });
@@ -1000,7 +1366,71 @@ function renderPalette() {
   }
 }
 
+function setBrush(id) {
+  state.brush = id;
+  state.tool = "pen";
+  writePref("qiang.brush", id);
+  renderTools();
+  if (!els.brushes.hidden) renderBrushes();
+}
+
+function cycleStab() {
+  state.stab = (state.stab + 1) % STAB_RADIUS.length;
+  writePref("qiang.stab", state.stab);
+  renderTools();
+  toast(`防抖：${STAB_NAMES[state.stab]}`, 1000);
+}
+
+// 笔刷面板：每种笔刷用当前颜色画一条示例线
+function renderBrushes() {
+  els.brushList.replaceChildren();
+  BRUSHES.forEach((b, i) => {
+    const row = document.createElement("button");
+    row.type = "button";
+    row.className = "brush-row" + (b.id === state.brush ? " active" : "");
+    const c = document.createElement("canvas");
+    const dpr = window.devicePixelRatio || 1;
+    c.width = 120 * dpr;
+    c.height = 34 * dpr;
+    c.className = "brush-sample";
+    const ctx = c.getContext("2d");
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    const pts = [];
+    for (let x = 10; x <= 110; x += 3) pts.push({ x, y: 17 + Math.sin((x - 10) / 16) * 8 });
+    drawStroke(ctx, { type: "pen", brush: b.id, color: state.color || "#1A1A1A", width: 7, points: pts });
+    const text = document.createElement("span");
+    text.className = "brush-text";
+    text.innerHTML = `<b></b><small></small>`;
+    text.querySelector("b").textContent = `${b.name}`;
+    text.querySelector("small").textContent = b.desc;
+    const key = document.createElement("kbd");
+    key.textContent = String(i + 1);
+    row.append(c, text, key);
+    row.addEventListener("click", () => {
+      setBrush(b.id);
+      closeBrushes();
+    });
+    els.brushList.appendChild(row);
+  });
+}
+
+function openBrushes() {
+  closePalette();
+  hideTip();
+  renderBrushes();
+  els.brushes.hidden = false;
+  const tb = els.toolbar.getBoundingClientRect();
+  const btn = els.penBtn.getBoundingClientRect();
+  els.brushes.style.left = `${tb.right + 8}px`;
+  els.brushes.style.top = `${Math.max(8, Math.min(window.innerHeight - els.brushes.offsetHeight - 8, btn.top - 12))}px`;
+}
+
+function closeBrushes() {
+  els.brushes.hidden = true;
+}
+
 function openPalette() {
+  closeBrushes();
   hideTip();
   renderPalette();
   els.palette.hidden = false;
@@ -1341,6 +1771,16 @@ function onMessage(msg) {
       redrawLive();
       break;
     }
+    case "stroke_replace": {
+      if (state.current && state.current.id === msg.id) break;
+      const live = state.live.get(msg.id);
+      if (live) {
+        live.points = msg.points;
+        live.shape = msg.shape;
+        redrawLive();
+      }
+      break;
+    }
     case "stroke_cancel":
       state.live.delete(msg.id);
       redrawLive();
@@ -1542,6 +1982,7 @@ function inputFocused() {
 function onKeyDown(e) {
   if (e.key === "Escape") {
     closePalette();
+    closeBrushes();
     cancelText();
     state.space = false;
     els.desk.classList.remove("panning", "dragging");
@@ -1573,6 +2014,10 @@ function onKeyDown(e) {
   if (k === "b" || k === "p") {
     state.tool = "pen";
     renderTools();
+  } else if (["1", "2", "3", "4"].includes(k)) {
+    setBrush(BRUSHES[Number(k) - 1].id);
+  } else if (k === "s") {
+    cycleStab();
   } else if (k === "e") {
     state.tool = "eraser";
     renderTools();
@@ -1589,7 +2034,7 @@ function onKeyDown(e) {
     state.size = Math.max(0, state.size - 1);
     renderTools();
   } else if (k === "]") {
-    state.size = Math.min(2, state.size + 1);
+    state.size = Math.min(PEN_WIDTHS.length - 1, state.size + 1);
     renderTools();
   }
 }
@@ -1639,7 +2084,7 @@ function maybeShowTouchHint() {
   } catch {
     return;
   }
-  toast("单指画画 · 双指拖动和缩放 · 选 ✋ 后单指拖动", 4000);
+  toast("单指画 · 双指拖动缩放 · 画完按住不动吸附成形状 · 再点笔可换笔刷", 5000);
 }
 
 // 指针已失效等情况下 setPointerCapture 会抛异常，不能让它打断后面的处理
@@ -1665,6 +2110,7 @@ function onPointerDown(e) {
     else cancelText();
   }
   if (e.pointerType === "pen") state.penSeen = true;
+  state.inputType = e.pointerType;
   if (e.pointerType === "touch") {
     touches.set(e.pointerId, { x: e.clientX, y: e.clientY });
     capturePointer(e);
@@ -1696,7 +2142,10 @@ function onPointerDown(e) {
     placeText(p);
     return;
   }
-  startStroke(p, e.pointerType === "touch");
+  if (e.pointerType === "pen" && e.pressure > 0) p.p = Math.round(e.pressure * 100) / 100;
+  // 按住 Shift：画直线，松手才定下来
+  const shape = e.shiftKey && state.tool !== "text" ? "line" : undefined;
+  startStroke(p, e.pointerType === "touch" || !!shape, { shape });
   capturePointer(e);
 }
 
@@ -1726,7 +2175,13 @@ function onPointerMove(e) {
   if (state.drawing) {
     // 浏览器会把一帧内的多次采样合并成一次事件；拿回全部采样点，快速画线和手写笔都更顺
     const evs = typeof e.getCoalescedEvents === "function" ? e.getCoalescedEvents() : [];
-    addPoints((evs.length ? evs : [e]).map((ev) => clipStroke(at(ev))));
+    onRawPoints(
+      (evs.length ? evs : [e]).map((ev) => {
+        const q = clipStroke(at(ev));
+        if (ev.pointerType === "pen" && ev.pressure > 0) q.p = Math.round(ev.pressure * 100) / 100;
+        return q;
+      })
+    );
   }
 }
 
@@ -2252,6 +2707,7 @@ function bindUi() {
   });
   document.addEventListener("click", () => {
     els.menu.hidden = true;
+    closeBrushes();
     closePalette();
   });
   els.btnPalette.addEventListener("click", (e) => {
@@ -2302,11 +2758,20 @@ function bindUi() {
   els.clearCancel.addEventListener("click", () => send({ type: "clear_cancel" }));
   els.overlayBack.addEventListener("click", () => goLobby(""));
   els.toolbar.querySelectorAll(".tool").forEach((btn) => {
-    btn.addEventListener("click", () => {
+    btn.addEventListener("click", (e) => {
+      // 已经拿着笔时再点一下：打开笔刷面板
+      if (btn.dataset.tool === "pen" && state.tool === "pen") {
+        e.stopPropagation();
+        if (els.brushes.hidden) openBrushes();
+        else closeBrushes();
+        return;
+      }
       state.tool = btn.dataset.tool;
       renderTools();
     });
   });
+  els.stabBtn.addEventListener("click", cycleStab);
+  els.brushes.addEventListener("click", (e) => e.stopPropagation());
   els.toolbar.querySelectorAll(".width-btn").forEach((btn) => {
     btn.addEventListener("click", () => {
       state.size = Number(btn.dataset.size);

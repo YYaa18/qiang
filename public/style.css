@@ -327,6 +327,7 @@ button:disabled { opacity: 0.4; cursor: default; }
 }
 #toolbar::-webkit-scrollbar { display: none; }
 #toolbar > * { flex-shrink: 0; }
+.row-break { display: none; }
 #toolbar .tool, #toolbar .width-btn, #toolbar #btn-undo, #toolbar #btn-redo, #toolbar #btn-fit {
   width: 36px;
   height: 36px;
@@ -357,9 +358,80 @@ button:disabled { opacity: 0.4; cursor: default; }
   background: var(--ink);
   border-radius: 50%;
 }
-.d1 { width: 4px; height: 4px; }
-.d2 { width: 8px; height: 8px; }
-.d3 { width: 12px; height: 12px; }
+.d1 { width: 3px; height: 3px; }
+.d2 { width: 5px; height: 5px; }
+.d3 { width: 8px; height: 8px; }
+.d4 { width: 11px; height: 11px; }
+.d5 { width: 15px; height: 15px; }
+#toolbar .width-btn { height: 28px; }
+
+/* 画笔按钮：显示当前笔刷；右下角小三角表示「再点一下换笔刷」 */
+#toolbar #btn-pen { position: relative; }
+#pen-icon svg { width: 20px; height: 20px; display: block; }
+#btn-pen .more {
+  position: absolute;
+  right: 3px;
+  bottom: 3px;
+  border: 3px solid transparent;
+  border-right-color: currentColor;
+  border-bottom-color: currentColor;
+  opacity: 0.55;
+}
+
+/* 防抖开关：图标 + 当前档位小字 */
+#toolbar #btn-stab {
+  width: 36px;
+  height: 40px;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 0;
+  background: transparent;
+  border: 1px solid transparent;
+}
+#toolbar #btn-stab svg { width: 18px; height: 18px; }
+#toolbar #btn-stab:hover { background: var(--hover); }
+#btn-stab .mini { font-size: 10px; line-height: 1; color: var(--muted); }
+#btn-stab.off svg { opacity: 0.4; }
+
+/* 笔刷面板 */
+#brushes {
+  position: fixed;
+  z-index: 25;
+  width: 300px;
+  padding: 12px;
+  background: var(--paper);
+  border: 1px solid var(--line);
+  box-shadow: 0 10px 28px rgba(40, 30, 20, 0.22);
+}
+.pal-hint { font-size: 11px; font-weight: 400; color: var(--muted); letter-spacing: 0.05em; }
+.brush-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  padding: 6px 8px;
+  margin-bottom: 4px;
+  text-align: left;
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: 0;
+}
+.brush-row:hover { background: var(--hover); }
+.brush-row.active { border-color: var(--me, var(--ink)); background: var(--field); }
+.brush-sample { width: 120px; height: 34px; flex-shrink: 0; }
+.brush-text { flex: 1; min-width: 0; display: flex; flex-direction: column; line-height: 1.3; }
+.brush-text b { font-size: 13px; }
+.brush-text small { font-size: 11px; color: var(--muted); }
+.brush-row kbd {
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--muted);
+  border: 1px solid var(--hairline);
+  padding: 0 5px;
+}
 #swatches { display: flex; flex-direction: column; gap: 6px; }
 .swatch {
   width: 22px;
@@ -872,6 +944,7 @@ button:disabled { opacity: 0.4; cursor: default; }
   .mobile-only { display: inline-flex; align-items: center; }
   .menu .mobile-only { display: block; }
   #tip { display: none !important; }
+  .brush-row kbd, .pal-hint { display: none; } /* 手机上没有键盘快捷键 */
 
   .lobby-card { width: calc(100vw - 32px); max-width: 360px; padding: 28px 20px 24px; }
   .field input, #code-input, #nick-input, #chat-input, #pal-hex { font-size: 16px; } /* 小于 16px 时 iOS 会自动放大页面 */
@@ -911,24 +984,38 @@ button:disabled { opacity: 0.4; cursor: default; }
 @media (max-width: 760px) {
   #workspace { flex-direction: column; }
   #desk { order: 1; }
+  /* 工具条两行，全部按钮直接可见：第一行工具和操作，第二行粗细和颜色 */
   #toolbar {
     order: 2;
     width: 100%;
-    height: 54px;
+    height: auto;
     flex-direction: row;
+    flex-wrap: wrap;
     align-items: center;
-    padding: 0 8px;
-    gap: 2px;
-    overflow-x: auto;
-    overflow-y: hidden;
-    touch-action: pan-x;
+    justify-content: space-between;
+    row-gap: 2px;
+    column-gap: 2px;
+    padding: 4px 8px;
+    overflow: visible;
+    touch-action: manipulation;
     border-right: none;
     border-top: 1px solid var(--hairline);
   }
-  #toolbar .sep { width: 1px; height: 24px; margin: 0 6px; }
-  #toolbar #btn-palette { margin-top: 0; }
-  #swatches { flex-direction: row; gap: 6px; }
-  .swatch { width: 26px; height: 26px; }
+  #toolbar .sep { display: none; }
+  .row-break { display: block; flex-basis: 100%; height: 0; order: 20; }
+  #toolbar [data-tool="pen"] { order: 1; }
+  #toolbar [data-tool="eraser"] { order: 2; }
+  #toolbar [data-tool="text"] { order: 3; }
+  #toolbar [data-tool="hand"] { order: 4; }
+  #toolbar #btn-stab { order: 5; }
+  #toolbar #btn-undo { order: 6; }
+  #toolbar #btn-redo { order: 7; }
+  #toolbar #btn-fit { order: 8; }
+  #toolbar .width-btn { order: 21; width: 26px; }
+  #toolbar #swatches { order: 30; }
+  #toolbar #btn-palette { order: 31; margin-top: 0; }
+  #swatches { flex-direction: row; gap: 5px; }
+  .swatch { width: 24px; height: 24px; }
   #chat {
     left: 0;
     right: 0;
@@ -941,13 +1028,15 @@ button:disabled { opacity: 0.4; cursor: default; }
     height: calc(26px + env(safe-area-inset-bottom));
     padding-bottom: env(safe-area-inset-bottom);
   }
-  #palette {
+  #palette, #brushes {
     left: 8px !important;
     right: 8px;
     top: auto !important;
-    bottom: calc(92px + env(safe-area-inset-bottom));
+    bottom: calc(120px + env(safe-area-inset-bottom));
     width: auto;
   }
+  #toolbar .width-btn { height: 36px; }
+  #toolbar #btn-stab { height: 36px; }
 }
 
 /* 横屏：工具条留在左边、可以上下滑；聊天从右边滑出 */
