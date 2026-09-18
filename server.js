@@ -845,6 +845,17 @@ function handleStrokeEnd(ws, msg) {
   commitStroke(room, s.id);
 }
 
+// 触屏上第二根手指落下时撤回刚起笔的那一笔：还没落定，直接丢掉
+function handleStrokeCancel(ws, msg) {
+  const ctx = ctxOf(ws);
+  if (!ctx) return;
+  const { room, user } = ctx;
+  const s = room.open.get(msg.id);
+  if (!s || s.userId !== user.id) return;
+  room.open.delete(msg.id);
+  broadcast(room, { type: "stroke_cancel", id: msg.id });
+}
+
 function handleTextPlace(ws, msg) {
   const ctx = ctxOf(ws);
   if (!ctx) return;
@@ -1156,6 +1167,9 @@ function handleMessage(ws, raw) {
       break;
     case "stroke_end":
       handleStrokeEnd(ws, msg);
+      break;
+    case "stroke_cancel":
+      handleStrokeCancel(ws, msg);
       break;
     case "text_place":
       handleTextPlace(ws, msg);

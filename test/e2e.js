@@ -515,6 +515,25 @@ async function main() {
       assert(!a.msgs.some((m) => m.type === "stroke_start" && m.stroke.id !== ok), "invalid colors rejected");
     });
 
+    await test("a stroke can be cancelled before it ends", async () => {
+      const hostId = uuid();
+      const code = await createRoom(port, hostId);
+      const a = track(await join(port, { code, name: "甲", clientId: hostId }));
+      const snap = await a.wait("snapshot");
+      const b = track(await join(port, { code, name: "乙", clientId: uuid() }));
+      await b.wait("snapshot");
+      const id = uuid();
+      a.send({ type: "stroke_start", id, strokeType: "pen", color: snap.you.color, width: 8, x: 10, y: 10 });
+      a.send({ type: "stroke_point", id, points: [{ x: 20, y: 20 }] });
+      a.send({ type: "stroke_cancel", id });
+      const c = await b.wait("stroke_cancel");
+      assert(c.id === id, "others drop the live stroke");
+      a.send({ type: "stroke_end", id }); // 已取消的笔不能再落定
+      const c2 = track(await join(port, { code, name: "丙", clientId: uuid() }));
+      const s2 = await c2.wait("snapshot");
+      assert(!s2.strokes.some((st) => st.id === id), "cancelled stroke never lands");
+    });
+
     await test("leaving frees the seat right away", async () => {
       const hostId = uuid();
       const code = await createRoom(port, hostId);

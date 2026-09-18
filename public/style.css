@@ -132,10 +132,70 @@ button:disabled { opacity: 0.4; cursor: default; }
 }
 #code-input:placeholder-shown { font-family: var(--font); letter-spacing: normal; font-size: 14px; }
 .join-row {
+  position: relative;
   display: flex;
   gap: 8px;
 }
 .join-row input { flex: 1; }
+
+/* 去过的墙：输入框下方的下拉列表，宽度与整行对齐 */
+.combo { position: relative; flex: 1; display: flex; }
+.combo #code-input { padding-right: 30px; }
+#history-toggle {
+  position: absolute;
+  right: 2px;
+  top: 50%;
+  transform: translateY(-50%);
+  width: 26px;
+  height: 26px;
+  padding: 0;
+  border: none;
+  background: transparent;
+  color: var(--muted);
+  font-size: 12px;
+}
+#history-toggle:hover { color: var(--ink); background: var(--hover); }
+#history {
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: calc(100% + 4px);
+  z-index: 10;
+  max-height: 264px;
+  margin: 0;
+  padding: 4px 0;
+  overflow-y: auto;
+  list-style: none;
+  background: var(--paper);
+  border: 1px solid var(--line);
+  box-shadow: 0 10px 24px rgba(40, 30, 20, 0.18);
+}
+.hist-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 6px 8px 12px;
+  cursor: pointer;
+}
+.hist-item:hover, .hist-item.active { background: var(--hover); }
+.hist-item.active { box-shadow: inset 3px 0 0 var(--ink); }
+.hist-code { font-family: var(--mono); font-size: 15px; font-weight: 600; letter-spacing: 0.14em; }
+.hist-meta { flex: 1; min-width: 0; display: flex; flex-direction: column; line-height: 1.35; }
+.hist-people { font-size: 13px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.hist-when { font-size: 11px; color: var(--muted); }
+.hist-item mark { background: #f6d77a; color: inherit; padding: 0 1px; }
+.hist-del {
+  width: 26px;
+  height: 26px;
+  padding: 0;
+  border: none;
+  background: transparent;
+  color: var(--muted);
+  font-size: 16px;
+  line-height: 1;
+}
+.hist-del:hover { color: var(--danger); background: rgba(139, 46, 46, 0.08); }
+.hist-empty { padding: 10px 12px; font-size: 13px; color: var(--muted); }
 #btn-create { margin-top: 4px; }
 .error, .hint {
   color: var(--danger);
@@ -258,7 +318,15 @@ button:disabled { opacity: 0.4; cursor: default; }
   padding: 8px 0;
   gap: 4px;
   flex-shrink: 0;
+  /* 窗口比工具条矮时可以上下滑动 */
+  overflow-x: hidden;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  touch-action: pan-y;
+  scrollbar-width: none;
 }
+#toolbar::-webkit-scrollbar { display: none; }
+#toolbar > * { flex-shrink: 0; }
 #toolbar .tool, #toolbar .width-btn, #toolbar #btn-undo, #toolbar #btn-redo, #toolbar #btn-fit {
   width: 36px;
   height: 36px;
@@ -382,7 +450,7 @@ button:disabled { opacity: 0.4; cursor: default; }
   user-select: none;
   -webkit-touch-callout: none;
 }
-#desk.panning { cursor: grab; }
+#desk.panning, #desk.hand-mode { cursor: grab; }
 #desk.panning.dragging { cursor: grabbing; }
 #paper-wrap {
   position: absolute;
@@ -799,22 +867,20 @@ button:disabled { opacity: 0.4; cursor: default; }
   text-align: center;
 }
 
-@media (max-width: 760px) {
+/* 手机通用：竖屏窄 或 横屏矮 */
+@media (max-width: 760px), (max-height: 520px) {
   .mobile-only { display: inline-flex; align-items: center; }
   .menu .mobile-only { display: block; }
   #tip { display: none !important; }
 
-  /* 门口 */
   .lobby-card { width: calc(100vw - 32px); max-width: 360px; padding: 28px 20px 24px; }
   .field input, #code-input, #nick-input, #chat-input, #pal-hex { font-size: 16px; } /* 小于 16px 时 iOS 会自动放大页面 */
 
-  /* 墙：顶栏 / 画布 / 底部工具条 / 底栏 */
   #wall { height: 100dvh; }
   #topbar {
     grid-template-columns: auto 1fr auto;
     gap: 6px;
-    padding: 0 6px 0 10px;
-    padding-top: env(safe-area-inset-top);
+    padding: env(safe-area-inset-top) calc(6px + env(safe-area-inset-right)) 0 calc(10px + env(safe-area-inset-left));
     height: calc(var(--bar-h) + env(safe-area-inset-top));
   }
   #btn-copy { display: none; }
@@ -824,6 +890,25 @@ button:disabled { opacity: 0.4; cursor: default; }
   .top-right { gap: 2px; }
   .top-right .btn-ghost { padding: 6px 8px; }
 
+  /* 聊天盖在画布上，不占画布的地方 */
+  #chat {
+    position: fixed;
+    z-index: 40;
+    width: auto;
+    border-left: none;
+    box-shadow: 0 -12px 32px rgba(40, 30, 20, 0.22);
+  }
+  #chat.chat-closed { display: none; }
+  #chat-rail { display: none !important; }
+  .composer-foot span:first-child { display: none; }
+  #drawing-hint { display: none; }
+  #seg-track { width: 96px; }
+  .pal-sw { min-height: 32px; }
+  .menu button { padding: 12px 14px; }
+}
+
+/* 竖屏：工具条在底部横排，聊天从底部弹出 */
+@media (max-width: 760px) {
   #workspace { flex-direction: column; }
   #desk { order: 1; }
   #toolbar {
@@ -836,43 +921,26 @@ button:disabled { opacity: 0.4; cursor: default; }
     gap: 2px;
     overflow-x: auto;
     overflow-y: hidden;
+    touch-action: pan-x;
     border-right: none;
     border-top: 1px solid var(--hairline);
-    scrollbar-width: none;
   }
-  #toolbar::-webkit-scrollbar { display: none; }
-  #toolbar > * { flex-shrink: 0; }
   #toolbar .sep { width: 1px; height: 24px; margin: 0 6px; }
   #toolbar #btn-palette { margin-top: 0; }
   #swatches { flex-direction: row; gap: 6px; }
   .swatch { width: 26px; height: 26px; }
-
-  /* 聊天：从底部弹出的面板，盖在画布上 */
   #chat {
-    position: fixed;
     left: 0;
     right: 0;
     bottom: 0;
-    width: auto;
     height: 62dvh;
-    z-index: 40;
-    border-left: none;
     border-top: 1px solid var(--line);
-    box-shadow: 0 -12px 32px rgba(40, 30, 20, 0.22);
     padding-bottom: env(safe-area-inset-bottom);
   }
-  #chat.chat-closed { display: none; }
-  #chat-rail { display: none !important; }
-  .composer-foot span:first-child { display: none; }
-
   #bottombar {
     height: calc(26px + env(safe-area-inset-bottom));
     padding-bottom: env(safe-area-inset-bottom);
   }
-  #drawing-hint { display: none; }
-  #seg-track { width: 96px; }
-
-  /* 调色板：贴着底部工具条，左右留边 */
   #palette {
     left: 8px !important;
     right: 8px;
@@ -880,7 +948,24 @@ button:disabled { opacity: 0.4; cursor: default; }
     bottom: calc(92px + env(safe-area-inset-bottom));
     width: auto;
   }
-  .pal-sw { min-height: 32px; }
-  #menu { right: 0; min-width: 150px; }
-  .menu button { padding: 12px 14px; }
+}
+
+/* 横屏：工具条留在左边、可以上下滑；聊天从右边滑出 */
+@media (min-width: 761px) and (max-height: 520px) {
+  #toolbar {
+    width: calc(48px + env(safe-area-inset-left));
+    padding: 6px 0 6px env(safe-area-inset-left);
+    gap: 2px;
+  }
+  #toolbar .sep { margin: 3px 0; }
+  #chat {
+    top: 0;
+    right: 0;
+    bottom: 0;
+    width: min(340px, 50vw);
+    border-left: 1px solid var(--line);
+    box-shadow: -12px 0 32px rgba(40, 30, 20, 0.22);
+    padding-right: env(safe-area-inset-right);
+  }
+  #bottombar { height: 24px; }
 }

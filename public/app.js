@@ -28,6 +28,9 @@ const PRESETS = [
 ];
 const LIGHT = new Set(["#FFFFFF", "#CED4DA", "#F3D9B1", "#FCC419", "#3BC9DB"]);
 const STORAGE_RECENT = "qiang.recentColors";
+const STORAGE_HISTORY = "qiang.history"; // 去过的墙，只存在本机
+const HISTORY_MAX = 30;
+const CODE_RE = /^[ABCDEFGHJKLMNPQRSTUVWXYZ23456789]{4}$/;
 const STORAGE_ID = "qiang.clientId";
 const STORAGE_NAME = "qiang.name";
 // 笔画点允许超出纸面的余量（与服务端一致），canvas 会自然裁掉超出部分
@@ -42,6 +45,8 @@ const els = {
   create: $("btn-create"),
   joinForm: $("join-form"),
   codeInput: $("code-input"),
+  historyList: $("history"),
+  historyToggle: $("history-toggle"),
   lobbyError: $("lobby-error"),
   roomCode: $("room-code"),
   copy: $("btn-copy"),
@@ -186,13 +191,13 @@ function showLobbyError(text, kind = "error") {
   els.lobbyError.textContent = text || "";
 }
 
-function toast(text) {
+function toast(text, ms = 1600) {
   els.toast.hidden = false;
   els.toast.textContent = text;
   clearTimeout(toast._t);
   toast._t = setTimeout(() => {
     els.toast.hidden = true;
-  }, 1600);
+  }, ms);
 }
 
 function showOverlay(text) {
@@ -737,6 +742,8 @@ function commitPending() {
 
 function cancelStroke() {
   clearTimeout(state.pendingTimer);
+  // 已经发出去的也撤回：服务端丢掉这笔，别人那边的预览也会消失
+  if (state.current && !state.current.pending) send({ type: "stroke_cancel", id: state.current.id });
   state.current = null;
   state.drawing = false;
   state.pointBuf = [];
@@ -873,6 +880,7 @@ function applySnapshot(snap) {
   renderTools();
   updateLockUi();
   updateStacks();
+  rememberRoom();
   if (snap.clearDeadline && snap.clearDeadline > Date.now()) {
     startClearUi(snap.clearDeadline);
   } else {
@@ -882,6 +890,7 @@ function applySnapshot(snap) {
 
 function renderTools() {
   document.documentElement.style.setProperty("--me", (state.you && state.you.color) || "#1A1A1A");
+  els.desk.classList.toggle("hand-mode", state.tool === "hand");
   els.toolbar.querySelectorAll(".tool").forEach((btn) => {
     btn.classList.toggle("active", btn.dataset.tool === state.tool);
   });
@@ -963,7 +972,7 @@ function setColor(c, remember = true) {
   if (!baseColors().includes(c)) state.custom = c;
   if (remember) rememberColor(c);
   // 拿着橡皮选颜色，就是想画了
-  if (state.tool === "eraser") {
+  if (state.tool === "eraser" || state.tool === "hand") {
     state.tool = "pen";
     renderTools();
   }
@@ -1196,8 +1205,9 @@ function updateUnread() {
   }
 }
 
+// 竖屏窄 或 横屏矮，都按手机处理
 function isMobile() {
-  return window.matchMedia("(max-width: 760px)").matches;
+  return window.matchMedia("(max-width: 760px), (max-height: 520px)").matches;
 }
 
 function setChatOpen(open) {
@@ -1283,6 +1293,7 @@ function onMessage(msg) {
       if (!els.wall.hidden && state.you) {
         toast(msg.message || "出错了");
       } else {
+        if (msg.code === "not_found") forgetRoom(state.code); // 墙已经没了，从去过的列表里拿掉
         goLobby(msg.message || "进不去");
       }
       break;
@@ -1298,6 +1309,7 @@ function onMessage(msg) {
     case "presence": {
       const before = state.users;
       state.users = msg.users || [];
+      rememberRoom();
       // 名单里第一次出现的人才算「来了」；宽限期内重连的人一直在名单上，不会重复提示
       const fresh = state.users.filter(
         (u) => !state.knownIds.has(u.id) && !(state.you && u.id === state.you.id)
@@ -1329,6 +1341,10 @@ function onMessage(msg) {
       redrawLive();
       break;
     }
+    case "stroke_cancel":
+      state.live.delete(msg.id);
+      redrawLive();
+      break;
     case "stroke_point": {
       const live = state.live.get(msg.id);
       if (live && msg.points) live.points.push(...msg.points);
@@ -1563,6 +1579,9 @@ function onKeyDown(e) {
   } else if (k === "t") {
     state.tool = "text";
     renderTools();
+  } else if (k === "h") {
+    state.tool = "hand";
+    renderTools();
   } else if (k === "c") {
     if (els.palette.hidden) openPalette();
     else closePalette();
@@ -1612,6 +1631,17 @@ function updateGesture() {
   applyView();
 }
 
+// 触屏设备第一次在墙上落指时，提示一次怎么拖动画布
+function maybeShowTouchHint() {
+  try {
+    if (localStorage.getItem("qiang.touchHint")) return;
+    localStorage.setItem("qiang.touchHint", "1");
+  } catch {
+    return;
+  }
+  toast("单指画画 · 双指拖动和缩放 · 选 ✋ 后单指拖动", 4000);
+}
+
 // 指针已失效等情况下 setPointerCapture 会抛异常，不能让它打断后面的处理
 function capturePointer(e) {
   try {
@@ -1639,18 +1669,20 @@ function onPointerDown(e) {
     touches.set(e.pointerId, { x: e.clientX, y: e.clientY });
     capturePointer(e);
     if (touches.size >= 2) {
-      // 第二根手指到了：还没发出去的那一笔撤回；已经在画的就收笔
-      if (state.current && state.current.pending) cancelStroke();
+      // 第二根手指到了：刚起笔不到 0.4 秒的那一笔当作误触撤回；画了一阵的就收笔
+      if (state.current && (state.current.pending || Date.now() - state.current.t < 400)) cancelStroke();
       else if (state.drawing) endStroke();
       state.panning = false;
       startGesture();
       return;
     }
-    if (state.penSeen) {
+    if (state.penSeen || state.tool === "hand") {
       startPan(e);
+      maybeShowTouchHint();
       return;
     }
-  } else if (e.button === 1 || (e.button === 0 && state.space)) {
+    maybeShowTouchHint();
+  } else if (e.button === 1 || (e.button === 0 && (state.space || state.tool === "hand"))) {
     e.preventDefault();
     startPan(e);
     return;
@@ -1817,12 +1849,16 @@ function goLobby(err) {
   els.wall.hidden = true;
   els.lobby.hidden = false;
   hideOverlay();
+  renderHistory();
   showLobbyError(err || "");
   document.title = "墙";
 }
 
 function enterWall(code) {
   state.code = code.toUpperCase();
+  // 上一面墙的身份和名单要清掉，否则进一面不存在的墙时会被当成「已在墙里」，停在空墙上
+  state.you = null;
+  state.users = [];
   state.allowReconnect = true;
   state.replaced = false;
   state.name = (els.nick.value || loadName() || "朋友").trim().slice(0, 16);
@@ -1864,14 +1900,204 @@ async function createRoom() {
   }
 }
 
+// ───────────── 去过的墙：房间码输入框下的可搜索下拉列表 ─────────────
+
+function loadHistory() {
+  try {
+    const list = JSON.parse(localStorage.getItem(STORAGE_HISTORY) || "[]");
+    return Array.isArray(list) ? list.filter((h) => h && CODE_RE.test(h.code)) : [];
+  } catch {
+    return [];
+  }
+}
+
+function saveHistory(list) {
+  try {
+    localStorage.setItem(STORAGE_HISTORY, JSON.stringify(list.slice(0, HISTORY_MAX)));
+  } catch {
+    /* 存不了就算了 */
+  }
+}
+
+// 进墙成功、名单变化时记一笔：房间码、时间、是不是房主、在这面墙遇到过的人
+function rememberRoom() {
+  if (!state.code || !state.you) return;
+  const list = loadHistory();
+  const old = list.find((h) => h.code === state.code);
+  const others = state.users.filter((u) => u.id !== state.you.id).map((u) => u.name);
+  const people = [...new Set([...others, ...((old && old.people) || [])])].slice(0, 6);
+  const entry = { code: state.code, t: Date.now(), host: !!state.you.isHost || !!(old && old.host), people };
+  saveHistory([entry, ...list.filter((h) => h.code !== state.code)]);
+}
+
+function forgetRoom(code) {
+  saveHistory(loadHistory().filter((h) => h.code !== code));
+}
+
+function timeAgo(t) {
+  const m = Math.floor((Date.now() - t) / 60000);
+  if (m < 1) return "刚刚";
+  if (m < 60) return `${m} 分钟前`;
+  const h = Math.floor(m / 60);
+  if (h < 24) return `${h} 小时前`;
+  const d = Math.floor(h / 24);
+  if (d === 1) return "昨天";
+  if (d < 7) return `${d} 天前`;
+  const date = new Date(t);
+  return `${date.getMonth() + 1}月${date.getDate()}日`;
+}
+
+const hist = { open: false, items: [], active: -1 };
+
+// 把匹配到的那段包进 <mark>（用文本节点拼，不拼 HTML）
+function highlight(el, text, q) {
+  const i = q ? text.toLowerCase().indexOf(q) : -1;
+  if (i < 0) {
+    el.append(text);
+    return;
+  }
+  const mark = document.createElement("mark");
+  mark.textContent = text.slice(i, i + q.length);
+  el.append(text.slice(0, i), mark, text.slice(i + q.length));
+}
+
+function renderHistory() {
+  const all = loadHistory();
+  els.historyToggle.hidden = all.length === 0;
+  const q = els.codeInput.value.trim().toLowerCase();
+  hist.items = all.filter((h) => !q || h.code.toLowerCase().includes(q) || h.people.some((p) => p.toLowerCase().includes(q)));
+  if (hist.active >= hist.items.length) hist.active = hist.items.length - 1;
+  els.historyList.replaceChildren();
+  if (!hist.items.length) {
+    const li = document.createElement("li");
+    li.className = "hist-empty";
+    li.textContent = q ? "没有匹配的墙" : "还没去过别的墙";
+    els.historyList.appendChild(li);
+  }
+  hist.items.forEach((h, i) => {
+    const li = document.createElement("li");
+    li.className = "hist-item" + (i === hist.active ? " active" : "");
+    li.id = `hist-${h.code}`;
+    li.setAttribute("role", "option");
+    li.setAttribute("aria-selected", String(i === hist.active));
+    const code = document.createElement("span");
+    code.className = "hist-code";
+    highlight(code, h.code, q);
+    const meta = document.createElement("span");
+    meta.className = "hist-meta";
+    const who = document.createElement("span");
+    who.className = "hist-people";
+    if (h.people.length) {
+      h.people.forEach((p, k) => {
+        if (k) who.append("、");
+        highlight(who, p, q);
+      });
+    } else {
+      who.textContent = "只有我";
+    }
+    const when = document.createElement("span");
+    when.className = "hist-when";
+    when.textContent = (h.host ? "房主 · " : "") + timeAgo(h.t);
+    meta.append(who, when);
+    const del = document.createElement("button");
+    del.type = "button";
+    del.className = "hist-del";
+    del.textContent = "×";
+    del.title = "从列表里删掉（不会删墙）";
+    del.setAttribute("aria-label", `从列表里删掉 ${h.code}`);
+    // 用 pointerdown 挡住失焦，列表才不会在点击前收起
+    del.addEventListener("pointerdown", (e) => e.preventDefault());
+    del.addEventListener("click", (e) => {
+      e.stopPropagation();
+      forgetRoom(h.code);
+      renderHistory();
+    });
+    li.append(code, meta, del);
+    li.addEventListener("pointerdown", (e) => e.preventDefault());
+    li.addEventListener("click", () => chooseHistory(h));
+    els.historyList.appendChild(li);
+  });
+  els.codeInput.setAttribute("aria-activedescendant", hist.active >= 0 ? `hist-${hist.items[hist.active].code}` : "");
+}
+
+function openHistory() {
+  if (!loadHistory().length) return;
+  hist.open = true;
+  hist.active = -1;
+  renderHistory();
+  els.historyList.hidden = false;
+  els.codeInput.setAttribute("aria-expanded", "true");
+}
+
+function closeHistory() {
+  hist.open = false;
+  hist.active = -1;
+  els.historyList.hidden = true;
+  els.codeInput.setAttribute("aria-expanded", "false");
+}
+
+function chooseHistory(h) {
+  els.codeInput.value = h.code;
+  closeHistory();
+  tryJoinFromForm();
+}
+
+function moveActive(d) {
+  if (!hist.items.length) return;
+  hist.active = (hist.active + d + hist.items.length) % hist.items.length;
+  renderHistory();
+  const el = els.historyList.children[hist.active];
+  if (el) el.scrollIntoView({ block: "nearest" });
+}
+
+function bindHistory() {
+  renderHistory();
+  els.codeInput.addEventListener("focus", openHistory);
+  els.codeInput.addEventListener("input", () => {
+    if (!hist.open) openHistory();
+    else {
+      hist.active = -1;
+      renderHistory();
+    }
+  });
+  els.codeInput.addEventListener("blur", closeHistory);
+  els.codeInput.addEventListener("keydown", (e) => {
+    if (isImeEnter(e)) return;
+    if (e.key === "ArrowDown") {
+      e.preventDefault();
+      if (!hist.open) openHistory();
+      moveActive(1);
+    } else if (e.key === "ArrowUp") {
+      e.preventDefault();
+      moveActive(-1);
+    } else if (e.key === "Enter" && hist.open && hist.active >= 0) {
+      e.preventDefault();
+      chooseHistory(hist.items[hist.active]);
+    } else if (e.key === "Escape") {
+      closeHistory();
+    }
+  });
+  els.historyToggle.addEventListener("pointerdown", (e) => e.preventDefault());
+  els.historyToggle.addEventListener("click", () => {
+    if (hist.open) closeHistory();
+    else {
+      els.codeInput.focus();
+      openHistory();
+    }
+  });
+}
+
 function tryJoinFromForm(e) {
   if (e) e.preventDefault();
-  const code = els.codeInput.value.trim().toUpperCase();
+  let code = els.codeInput.value.trim().toUpperCase();
   if (!code) {
     showLobbyError("请输入房间码");
     return;
   }
-  if (!/^[ABCDEFGHJKLMNPQRSTUVWXYZ23456789]{4}$/.test(code)) {
+  // 输的不是房间码（比如朋友的名字）：进搜索结果里的第一面墙
+  if (!CODE_RE.test(code) && hist.items.length) code = hist.items[0].code;
+  closeHistory();
+  if (!CODE_RE.test(code)) {
     showLobbyError("没有这面墙");
     return;
   }
@@ -2006,6 +2232,7 @@ function leaveWall() {
 }
 
 function bindUi() {
+  bindHistory();
   els.nick.value = loadName();
   els.create.addEventListener("click", createRoom);
   els.nick.addEventListener("keydown", (e) => {
@@ -2129,6 +2356,10 @@ function bindUi() {
       cancelText();
     }
   });
+  // iOS Safari 自己的双指缩放（gesture* 事件）会抢走画布上的双指手势
+  for (const t of ["gesturestart", "gesturechange", "gestureend"]) {
+    document.addEventListener(t, (e) => e.preventDefault(), { passive: false });
+  }
   els.desk.addEventListener("pointerdown", onPointerDown);
   els.desk.addEventListener("pointermove", onPointerMove);
   els.desk.addEventListener("pointerup", onPointerUp);
