@@ -20,8 +20,11 @@ const GRACE_MS = 10_000;
 const CHAT_MAX = 100;
 const UNDO_MAX = 50;
 const NAME_MAX = 16;
-const CANVAS_W = 1600;
+// 墙是横向卷轴：由若干段拼成，每段 SEG_W×CANVAS_H，坐标全局连续
+const SEG_W = 1600;
 const CANVAS_H = 1000;
+// 20 段 = 32000 像素，恰好在浏览器单张 canvas 宽度上限（32767）以内，导出 PNG 不会失败
+const MAX_SEGMENTS = 20;
 // 笔画点允许超出纸面的余量：canvas 自己会裁掉，避免拖出纸边时贴边画线
 const STROKE_MARGIN = 40;
 const UUID_RE =
@@ -58,6 +61,7 @@ class Room {
     /** @type {ChatMessage[]} */
     this.chat = [];
     this.nextSeq = 1;
+    this.segments = 1;
     /** @type {Record<string, string>} */
     this.colorByUser = {};
     /** @type {Record<string, { undo: string[], redo: string[] }>} */
@@ -150,19 +154,23 @@ function cleanName(name) {
   return s || "朋友";
 }
 
-function clipPoint(x, y, margin = 0) {
+function wallWidth(room) {
+  return room.segments * SEG_W;
+}
+
+function clipPoint(room, x, y, margin = 0) {
   const nx = Number(x);
   const ny = Number(y);
   if (!Number.isFinite(nx) || !Number.isFinite(ny)) return null;
   return {
-    x: Math.max(-margin, Math.min(CANVAS_W + margin, nx)),
+    x: Math.max(-margin, Math.min(wallWidth(room) + margin, nx)),
     y: Math.max(-margin, Math.min(CANVAS_H + margin, ny)),
   };
 }
 
-function asPoint(p, margin = 0) {
-  if (Array.isArray(p) && p.length >= 2) return clipPoint(p[0], p[1], margin);
-  if (p && typeof p === "object") return clipPoint(p.x, p.y, margin);
+function asPoint(room, p, margin = 0) {
+  if (Array.isArray(p) && p.length >= 2) return clipPoint(room, p[0], p[1], margin);
+  if (p && typeof p === "object") return clipPoint(room, p.x, p.y, margin);
   return null;
 }
 
@@ -241,6 +249,7 @@ function snapshotMsg(room, user) {
     strokes: room.strokes,
     chat: room.chat,
     locked: room.locked,
+    segments: room.segments,
     clearDeadline: room.clearDeadline,
     you: youInfo(room, user),
   };
@@ -270,6 +279,7 @@ function serialize(room) {
     strokes: room.strokes,
     chat: room.chat,
     nextSeq: room.nextSeq,
+    segments: room.segments,
     colorByUser: room.colorByUser,
     stacks: room.stacks,
     clearDeadline: room.clearDeadline,
@@ -349,6 +359,7 @@ function loadRooms() {
       room.strokes = Array.isArray(raw.strokes) ? raw.strokes : [];
       room.chat = Array.isArray(raw.chat) ? raw.chat : [];
       room.nextSeq = Number(raw.nextSeq) || 1;
+      room.segments = Math.min(MAX_SEGMENTS, Math.max(1, Math.floor(Number(raw.segments)) || 1));
       room.colorByUser = raw.colorByUser || {};
       room.stacks = raw.stacks || {};
       room.clearDeadline = raw.clearDeadline || null;
@@ -515,7 +526,7 @@ function handleStrokeStart(ws, msg) {
   const width = Number(msg.width);
   const widths = strokeType === "eraser" ? ERASER_WIDTHS : PEN_WIDTHS;
   if (!widths.includes(width)) return;
-  const p = asPoint({ x: msg.x, y: msg.y }) || asPoint(msg.point);
+  const p = asPoint(room, { x: msg.x, y: msg.y }) || asPoint(room, msg.point);
   if (!p) return;
   finishOpenStrokes(room, user.id);
   const stroke = {
@@ -553,7 +564,7 @@ function handleStrokePoint(ws, msg) {
   const raw = Array.isArray(msg.points) ? msg.points : [msg];
   const pts = [];
   for (const item of raw) {
-    const p = asPoint(item, STROKE_MARGIN);
+    const p = asPoint(room, item, STROKE_MARGIN);
     if (p) {
       s.points.push(p);
       pts.push(p);
@@ -584,7 +595,7 @@ function handleTextPlace(ws, msg) {
   if (!validStrokeId(msg.id)) return;
   const color = allowedColor(user, normalizeHex(msg.color) || msg.color);
   if (!color) return;
-  const p = asPoint({ x: msg.x, y: msg.y });
+  const p = asPoint(room, { x: msg.x, y: msg.y });
   if (!p) return;
   const text = String(msg.text || "").replace(/\s+/g, " ").trim();
   if (!text) return;
@@ -667,7 +678,7 @@ function handleCursor(ws, msg) {
   const ctx = ctxOf(ws);
   if (!ctx) return;
   const { room, user } = ctx;
-  const p = asPoint({ x: msg.x, y: msg.y });
+  const p = asPoint(room, { x: msg.x, y: msg.y });
   if (!p) return;
   broadcast(
     room,
@@ -711,6 +722,24 @@ function handleLock(ws, locked) {
   if (room.locked) finishOpenStrokes(room, null, true);
   broadcast(room, { type: "lock", locked: room.locked });
   pushSystem(room, room.locked ? "墙被锁定了" : "墙解锁了");
+  scheduleSave(room);
+}
+
+function handleExtend(ws) {
+  const ctx = ctxOf(ws);
+  if (!ctx) return;
+  const { room, user } = ctx;
+  if (room.locked && user.id !== room.hostId) {
+    send(ws, { type: "error", code: "locked", message: "墙已锁定" });
+    return;
+  }
+  if (room.segments >= MAX_SEGMENTS) {
+    send(ws, { type: "error", code: "max_length", message: "墙已经够长了" });
+    return;
+  }
+  room.segments += 1;
+  broadcast(room, { type: "extend", segments: room.segments, userId: user.id });
+  pushSystem(room, `${user.name}把墙接长了一段`);
   scheduleSave(room);
 }
 
@@ -852,6 +881,9 @@ function handleMessage(ws, raw) {
       break;
     case "unlock":
       handleLock(ws, false);
+      break;
+    case "extend":
+      handleExtend(ws);
       break;
     case "clear_start":
       handleClearStart(ws);

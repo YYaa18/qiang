@@ -1,7 +1,13 @@
 "use strict";
 
-const CANVAS_W = 1600;
+// 墙是横向卷轴：若干段横向拼接，每段 SEG_W×CANVAS_H，坐标全局连续
+const SEG_W = 1600;
 const CANVAS_H = 1000;
+const MAX_SEGMENTS = 20;
+const PAD = 24; // 视图四周留白（屏幕像素）
+const EXTEND_GAP = 40; // 纸右缘到「接一段」按钮的距离（画布单位）
+const EXTEND_W = 140;
+const TEXT_FONT = '22px "PingFang SC","Microsoft YaHei",sans-serif';
 const PEN_WIDTHS = [3, 8, 18];
 const ERASER_WIDTHS = [8, 18, 36];
 const NEUTRALS = ["#1A1A1A", "#FFFFFF", "#868E96"];
@@ -38,9 +44,8 @@ const els = {
   fit: $("btn-fit"),
   desk: $("desk"),
   wrap: $("paper-wrap"),
-  paper: $("paper"),
-  ink: $("ink"),
-  live: $("live"),
+  tiles: $("tiles"),
+  extend: $("btn-extend"),
   cursors: $("cursors"),
   textBox: $("text-box"),
   chat: $("chat"),
@@ -75,7 +80,8 @@ const state = {
   size: 1,
   color: null,
   scale: 1,
-  fitScale: 1,
+  segments: 1,
+  tiles: [],
   panX: 0,
   panY: 0,
   space: false,
@@ -150,32 +156,63 @@ function send(obj) {
   }
 }
 
-function setupCanvases() {
-  const dpr = Math.max(1, window.devicePixelRatio || 1);
-  for (const c of [els.paper, els.ink, els.live]) {
-    c.width = Math.round(CANVAS_W * dpr);
-    c.height = Math.round(CANVAS_H * dpr);
-    const ctx = c.getContext("2d");
-    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+function wallW() {
+  return state.segments * SEG_W;
+}
+
+function dpr() {
+  return Math.max(1, window.devicePixelRatio || 1);
+}
+
+// 把上下文平移到第 i 段，之后直接用全局坐标作画
+function tileTransform(ctx, i) {
+  const r = dpr();
+  ctx.setTransform(r, 0, 0, r, -i * SEG_W * r, 0);
+}
+
+function makeTileCanvas(i) {
+  const c = document.createElement("canvas");
+  c.width = Math.round(SEG_W * dpr());
+  c.height = Math.round(CANVAS_H * dpr());
+  tileTransform(c.getContext("2d"), i);
+  return c;
+}
+
+function resetTiles() {
+  els.tiles.innerHTML = "";
+  state.tiles = [];
+}
+
+// 每段一组 canvas（纸 / 墨 / 正在画的笔），避开单张 canvas 的尺寸上限
+function setupTiles() {
+  while (state.tiles.length > state.segments) state.tiles.pop().root.remove();
+  for (let i = state.tiles.length; i < state.segments; i++) {
+    const root = document.createElement("div");
+    root.className = "tile";
+    root.style.left = `${i * SEG_W}px`;
+    const tile = {
+      i,
+      root,
+      paper: makeTileCanvas(i),
+      ink: makeTileCanvas(i),
+      live: makeTileCanvas(i),
+      liveUsed: false,
+    };
+    root.append(tile.paper, tile.ink, tile.live);
+    els.tiles.appendChild(root);
+    state.tiles.push(tile);
+    drawPaper(tile);
   }
-  drawPaper();
+  els.wrap.style.width = `${wallW()}px`;
+  updateExtendUi();
 }
 
-function paperCtx() {
-  return els.paper.getContext("2d");
-}
-function inkCtx() {
-  return els.ink.getContext("2d");
-}
-function liveCtx() {
-  return els.live.getContext("2d");
-}
-
-function drawPaper() {
-  const ctx = paperCtx();
+function drawPaper(tile) {
+  const ctx = tile.paper.getContext("2d");
+  const x0 = tile.i * SEG_W;
   ctx.fillStyle = "#F3EDE2";
-  ctx.fillRect(0, 0, CANVAS_W, CANVAS_H);
-  const img = ctx.getImageData(0, 0, els.paper.width, els.paper.height);
+  ctx.fillRect(x0, 0, SEG_W, CANVAS_H);
+  const img = ctx.getImageData(0, 0, tile.paper.width, tile.paper.height);
   const d = img.data;
   for (let i = 0; i < d.length; i += 4) {
     const n = (Math.random() - 0.5) * 14;
@@ -188,10 +225,60 @@ function drawPaper() {
   ctx.lineWidth = 1;
   for (let y = 40; y < CANVAS_H; y += 47) {
     ctx.beginPath();
-    ctx.moveTo(0, y + Math.sin(y) * 0.4);
-    ctx.lineTo(CANVAS_W, y);
+    ctx.moveTo(x0, y);
+    ctx.lineTo(x0 + SEG_W, y);
     ctx.stroke();
   }
+  if (tile.i > 0) {
+    // 段与段的接缝，像卷轴的粘接处
+    ctx.save();
+    ctx.strokeStyle = "rgba(80,60,40,0.16)";
+    ctx.setLineDash([6, 10]);
+    ctx.beginPath();
+    ctx.moveTo(x0 + 0.5, 0);
+    ctx.lineTo(x0 + 0.5, CANVAS_H);
+    ctx.stroke();
+    ctx.restore();
+  }
+}
+
+const measureCtx = document.createElement("canvas").getContext("2d");
+
+// 笔画的横向范围（画布单位），用来判断它落在哪几段
+function strokeBox(s) {
+  if (s.type === "text") {
+    measureCtx.font = TEXT_FONT;
+    return { x0: s.x, x1: s.x + measureCtx.measureText(s.text || "").width };
+  }
+  let x0 = Infinity;
+  let x1 = -Infinity;
+  for (const p of s.points || []) {
+    if (p.x < x0) x0 = p.x;
+    if (p.x > x1) x1 = p.x;
+  }
+  const h = (s.width || 0) / 2 + 1;
+  return { x0: x0 - h, x1: x1 + h };
+}
+
+// 已落定的笔画不再变化，范围可以缓存
+const boxCache = new WeakMap();
+function cachedBox(s) {
+  let b = boxCache.get(s);
+  if (!b) {
+    b = strokeBox(s);
+    boxCache.set(s, b);
+  }
+  return b;
+}
+
+function tilesOf(s) {
+  if (!s) return [];
+  const b = strokeBox(s);
+  const out = [];
+  const a = Math.max(0, Math.floor(b.x0 / SEG_W));
+  const z = Math.min(state.segments - 1, Math.floor(b.x1 / SEG_W));
+  for (let i = a; i <= z; i++) out.push(i);
+  return out;
 }
 
 function drawStroke(ctx, s) {
@@ -199,10 +286,10 @@ function drawStroke(ctx, s) {
   if (s.type === "text") {
     ctx.save();
     ctx.beginPath();
-    ctx.rect(0, 0, CANVAS_W, CANVAS_H);
+    ctx.rect(0, 0, wallW(), CANVAS_H);
     ctx.clip();
     ctx.fillStyle = s.color;
-    ctx.font = '22px "PingFang SC","Microsoft YaHei",sans-serif';
+    ctx.font = TEXT_FONT;
     ctx.textBaseline = "top";
     ctx.fillText(s.text || "", s.x, s.y);
     ctx.restore();
@@ -236,46 +323,58 @@ function drawStroke(ctx, s) {
   ctx.restore();
 }
 
-function rebuildInk() {
-  const ctx = inkCtx();
-  const dpr = Math.max(1, window.devicePixelRatio || 1);
-  const off = document.createElement("canvas");
-  off.width = els.ink.width;
-  off.height = els.ink.height;
-  const octx = off.getContext("2d");
-  octx.setTransform(dpr, 0, 0, dpr, 0, 0);
-  const list = state.strokes.slice().sort((a, b) => a.seq - b.seq);
-  for (const s of list) drawStroke(octx, s);
-  ctx.save();
-  ctx.setTransform(1, 0, 0, 1, 0, 0);
-  ctx.globalCompositeOperation = "copy";
-  ctx.drawImage(off, 0, 0);
-  ctx.restore();
-  els.ink.style.visibility = "";
+// 重建墨层：which 为段号数组，不传则重建全部段。每段按 seq 从小到大重画落在该段的笔
+function rebuildInk(which) {
+  const idxs = which ? [...new Set(which)] : state.tiles.map((t) => t.i);
+  if (!idxs.length) return;
+  const list = state.strokes.filter((s) => !s.hidden).sort((a, b) => a.seq - b.seq);
+  for (const i of idxs) {
+    const tile = state.tiles[i];
+    if (!tile) continue;
+    const off = document.createElement("canvas");
+    off.width = tile.ink.width;
+    off.height = tile.ink.height;
+    const octx = off.getContext("2d");
+    tileTransform(octx, i);
+    const lo = i * SEG_W;
+    const hi = lo + SEG_W;
+    for (const s of list) {
+      const b = cachedBox(s);
+      if (b.x1 < lo || b.x0 > hi) continue;
+      drawStroke(octx, s);
+    }
+    const ctx = tile.ink.getContext("2d");
+    ctx.save();
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
+    ctx.globalCompositeOperation = "copy";
+    ctx.drawImage(off, 0, 0);
+    ctx.restore();
+  }
+  // 有人正在用橡皮时，活动层里存着墨层的副本，需要跟着刷新
+  if (state.live.size || state.current) redrawLive();
 }
 
 function redrawLive() {
-  const ctx = liveCtx();
-  ctx.save();
-  ctx.setTransform(1, 0, 0, 1, 0, 0);
-  ctx.clearRect(0, 0, els.live.width, els.live.height);
-  ctx.restore();
   const lives = [...state.live.values()].sort((a, b) => a.seq - b.seq);
-  if (state.current) lives.push(state.current);
-  const visible = lives.filter(
-    (s) => !(state.current && s.id === state.current.id && s !== state.current)
-  );
-  const hasEraser = visible.some((s) => s.type === "eraser");
-  if (hasEraser) {
+  if (state.current && !state.live.has(state.current.id)) lives.push(state.current);
+  const boxes = lives.map((s) => [s, strokeBox(s)]);
+  for (const tile of state.tiles) {
+    const lo = tile.i * SEG_W;
+    const hi = lo + SEG_W;
+    const here = boxes.filter(([, b]) => b.x1 >= lo && b.x0 <= hi).map(([s]) => s);
+    if (!here.length && !tile.liveUsed) continue;
+    const ctx = tile.live.getContext("2d");
+    const erasing = here.some((s) => s.type === "eraser");
     ctx.save();
     ctx.setTransform(1, 0, 0, 1, 0, 0);
-    ctx.drawImage(els.ink, 0, 0);
+    ctx.clearRect(0, 0, tile.live.width, tile.live.height);
+    // 橡皮要在墨上真擦：把墨层复制到活动层上擦，期间隐藏墨层
+    if (erasing) ctx.drawImage(tile.ink, 0, 0);
     ctx.restore();
-    els.ink.style.visibility = "hidden";
-  } else {
-    els.ink.style.visibility = "";
+    tile.ink.style.visibility = erasing ? "hidden" : "";
+    for (const s of here) drawStroke(ctx, s);
+    tile.liveUsed = here.length > 0;
   }
-  for (const s of visible) drawStroke(ctx, s);
   updateDrawingHint();
 }
 
@@ -292,48 +391,95 @@ function updateDrawingHint() {
   els.drawingHint.textContent = names.length ? `${names.join("、")}落笔中` : "";
 }
 
-function fitView() {
+function heightFitScale() {
   const r = els.desk.getBoundingClientRect();
-  const pad = 36;
-  const sx = (r.width - pad * 2) / CANVAS_W;
-  const sy = (r.height - pad * 2) / CANVAS_H;
-  state.fitScale = Math.max(0.05, Math.min(sx, sy));
-  state.scale = state.fitScale;
-  state.panX = (r.width - CANVAS_W * state.scale) / 2;
-  state.panY = (r.height - CANVAS_H * state.scale) / 2;
-  applyView();
+  return Math.max(0.05, (r.height - PAD * 2) / CANVAS_H);
+}
+
+// 纸 + 末端「接一段」按钮的总宽（画布单位）
+function contentW() {
+  return wallW() + (els.extend.hidden ? 0 : EXTEND_GAP + EXTEND_W);
+}
+
+// 最小可以缩到整条卷轴都看得见，最大 200%
+function scaleLimits() {
+  const r = els.desk.getBoundingClientRect();
+  const fit = heightFitScale();
+  const whole = (r.width - PAD * 2) / contentW();
+  return { min: Math.max(0.05, Math.min(fit, whole)), max: Math.max(2, fit) };
+}
+
+function clampPan() {
+  const r = els.desk.getBoundingClientRect();
+  const w = contentW() * state.scale;
+  const h = CANVAS_H * state.scale;
+  if (w + PAD * 2 <= r.width) state.panX = (r.width - w) / 2;
+  else state.panX = Math.min(PAD, Math.max(r.width - PAD - w, state.panX));
+  if (h + PAD * 2 <= r.height) state.panY = (r.height - h) / 2;
+  else state.panY = Math.min(PAD, Math.max(r.height - PAD - h, state.panY));
 }
 
 function applyView() {
-  const max = Math.max(state.fitScale, 2);
-  state.scale = Math.max(state.fitScale, Math.min(max, state.scale));
+  const { min, max } = scaleLimits();
+  state.scale = Math.max(min, Math.min(max, state.scale));
+  clampPan();
   els.wrap.style.transform = `translate(${state.panX}px, ${state.panY}px) scale(${state.scale})`;
 }
 
+// 进墙：纸的高度铺满屏幕，从卷轴最左端开始
+function resetView() {
+  state.scale = heightFitScale();
+  state.panX = PAD;
+  applyView();
+}
+
+// 回正：高度铺满，横向保持正在看的位置
+function fitView() {
+  const r = els.desk.getBoundingClientRect();
+  const cx = (r.width / 2 - state.panX) / state.scale;
+  state.scale = heightFitScale();
+  state.panX = r.width / 2 - cx * state.scale;
+  applyView();
+}
+
+// 自己接长后滑到卷轴末端
+function glideToEnd() {
+  const r = els.desk.getBoundingClientRect();
+  state.panX = r.width - PAD - contentW() * state.scale;
+  els.wrap.classList.add("gliding");
+  applyView();
+  clearTimeout(glideToEnd.t);
+  glideToEnd.t = setTimeout(() => els.wrap.classList.remove("gliding"), 400);
+}
+
+function updateExtendUi() {
+  const blocked = state.locked && !(state.you && state.you.isHost);
+  els.extend.hidden = state.segments >= MAX_SEGMENTS || blocked;
+  els.extend.style.left = `${wallW() + EXTEND_GAP}px`;
+}
+
 function toCanvas(e) {
-  const r = els.ink.getBoundingClientRect();
-  if (r.width === 0 || r.height === 0) return null;
-  const x = ((e.clientX - r.left) / r.width) * CANVAS_W;
-  const y = ((e.clientY - r.top) / r.height) * CANVAS_H;
-  return { x, y };
+  const r = els.wrap.getBoundingClientRect();
+  if (!state.scale) return null;
+  return { x: (e.clientX - r.left) / state.scale, y: (e.clientY - r.top) / state.scale };
 }
 
 function clip(p) {
   return {
-    x: Math.max(0, Math.min(CANVAS_W, p.x)),
+    x: Math.max(0, Math.min(wallW(), p.x)),
     y: Math.max(0, Math.min(CANVAS_H, p.y)),
   };
 }
 
 function clipStroke(p) {
   return {
-    x: Math.max(-STROKE_MARGIN, Math.min(CANVAS_W + STROKE_MARGIN, p.x)),
+    x: Math.max(-STROKE_MARGIN, Math.min(wallW() + STROKE_MARGIN, p.x)),
     y: Math.max(-STROKE_MARGIN, Math.min(CANVAS_H + STROKE_MARGIN, p.y)),
   };
 }
 
 function insidePaper(p) {
-  return p.x >= 0 && p.x <= CANVAS_W && p.y >= 0 && p.y <= CANVAS_H;
+  return p.x >= 0 && p.x <= wallW() && p.y >= 0 && p.y <= CANVAS_H;
 }
 
 function currentWidth() {
@@ -401,7 +547,7 @@ function endStroke() {
   state.drawing = false;
   if (!state.strokes.some((s) => s.id === done.id)) {
     state.strokes.push(done);
-    rebuildInk();
+    rebuildInk(tilesOf(done));
   }
   redrawLive();
 }
@@ -434,7 +580,7 @@ function commitText() {
   send({ type: "text_place", id, color: state.color, text, x, y });
   if (!state.strokes.some((s) => s.id === id)) {
     state.strokes.push(stroke);
-    rebuildInk();
+    rebuildInk(tilesOf(stroke));
   }
 }
 
@@ -478,6 +624,8 @@ function applySnapshot(snap) {
     }
   }
   els.roomCode.textContent = snap.code;
+  state.segments = Math.min(MAX_SEGMENTS, Math.max(1, Number(snap.segments) || 1));
+  setupTiles();
   rebuildInk();
   redrawLive();
   renderChat(true);
@@ -530,6 +678,8 @@ function renderSwatches() {
 function updateLockUi() {
   els.lockBadge.hidden = !state.locked;
   renderTools();
+  updateExtendUi();
+  applyView();
 }
 
 function updateStacks() {
@@ -694,14 +844,26 @@ function onMessage(msg) {
         state.current = null;
         state.drawing = false;
       }
-      rebuildInk();
+      rebuildInk(tilesOf(msg.stroke));
       redrawLive();
       break;
     }
     case "text_place":
       if (msg.stroke) upsertStroke(msg.stroke);
-      rebuildInk();
+      rebuildInk(tilesOf(msg.stroke));
       break;
+    case "extend": {
+      const before = state.segments;
+      state.segments = Math.min(MAX_SEGMENTS, Math.max(1, Number(msg.segments) || 1));
+      setupTiles();
+      // 超出旧纸边的那点余量笔迹，现在落到了新段上
+      const added = [];
+      for (let i = before; i < state.segments; i++) added.push(i);
+      rebuildInk(added);
+      if (state.you && msg.userId === state.you.id) glideToEnd();
+      else applyView();
+      break;
+    }
     case "undo": {
       const s = state.strokes.find((x) => x.id === msg.id);
       if (s) s.hidden = true;
@@ -710,7 +872,7 @@ function onMessage(msg) {
         state.canRedo = !!msg.canRedo;
         updateStacks();
       }
-      rebuildInk();
+      rebuildInk(tilesOf(s));
       break;
     }
     case "redo": {
@@ -721,7 +883,7 @@ function onMessage(msg) {
         state.canRedo = !!msg.canRedo;
         updateStacks();
       }
-      rebuildInk();
+      rebuildInk(tilesOf(s));
       break;
     }
     case "stacks":
@@ -941,33 +1103,60 @@ function onPointerUp(e) {
 
 function onWheel(e) {
   e.preventDefault();
-  const r = els.desk.getBoundingClientRect();
-  const mx = e.clientX - r.left;
-  const my = e.clientY - r.top;
-  const cx = (mx - state.panX) / state.scale;
-  const cy = (my - state.panY) / state.scale;
-  const factor = e.deltaY > 0 ? 0.92 : 1.08;
-  state.scale *= factor;
-  applyView();
-  state.panX = mx - cx * state.scale;
-  state.panY = my - cy * state.scale;
+  const unit = e.deltaMode === 1 ? 16 : e.deltaMode === 2 ? els.desk.clientHeight : 1;
+  const dx = e.deltaX * unit;
+  const dy = e.deltaY * unit;
+  if (e.ctrlKey || e.metaKey) {
+    // Ctrl/Cmd + 滚轮、触控板双指捏合：以鼠标为中心缩放
+    const r = els.desk.getBoundingClientRect();
+    const mx = e.clientX - r.left;
+    const my = e.clientY - r.top;
+    const cx = (mx - state.panX) / state.scale;
+    const cy = (my - state.panY) / state.scale;
+    const { min, max } = scaleLimits();
+    state.scale = Math.max(min, Math.min(max, state.scale * Math.exp(-dy * 0.0015)));
+    state.panX = mx - cx * state.scale;
+    state.panY = my - cy * state.scale;
+    applyView();
+    return;
+  }
+  // 普通滚轮沿卷轴横向走；触控板双指滑动按手指方向平移
+  let px = dx;
+  let py = dy;
+  const fitsV = CANVAS_H * state.scale + PAD * 2 <= els.desk.clientHeight;
+  if (px === 0 && (e.shiftKey || fitsV)) {
+    px = py;
+    py = 0;
+  }
+  state.panX -= px;
+  state.panY -= py;
   applyView();
 }
 
 async function exportPng() {
   const out = document.createElement("canvas");
-  out.width = CANVAS_W;
+  out.width = wallW();
   out.height = CANVAS_H;
   const ctx = out.getContext("2d");
-  ctx.drawImage(els.paper, 0, 0, CANVAS_W, CANVAS_H);
-  ctx.drawImage(els.ink, 0, 0, CANVAS_W, CANVAS_H);
+  for (const t of state.tiles) {
+    ctx.drawImage(t.paper, t.i * SEG_W, 0, SEG_W, CANVAS_H);
+    ctx.drawImage(t.ink, t.i * SEG_W, 0, SEG_W, CANVAS_H);
+  }
   const a = document.createElement("a");
   const t = new Date();
   const pad = (n) => String(n).padStart(2, "0");
   const stamp = `${t.getFullYear()}${pad(t.getMonth() + 1)}${pad(t.getDate())}-${pad(t.getHours())}${pad(t.getMinutes())}${pad(t.getSeconds())}`;
   a.download = `墙-${state.code || "WALL"}-${stamp}.png`;
-  a.href = out.toDataURL("image/png");
-  a.click();
+  // 长卷轴的 PNG 可能有几十 MB，用 Blob 而不是 data URL
+  out.toBlob((blob) => {
+    if (!blob) {
+      toast("导出失败");
+      return;
+    }
+    a.href = URL.createObjectURL(blob);
+    a.click();
+    setTimeout(() => URL.revokeObjectURL(a.href), 10000);
+  }, "image/png");
 }
 
 function showLobby() {
@@ -1003,8 +1192,10 @@ function enterWall(code) {
   els.wall.hidden = false;
   hideOverlay();
   document.title = `墙 ${state.code}`;
-  setupCanvases();
-  fitView();
+  resetTiles();
+  state.segments = 1;
+  setupTiles();
+  resetView();
   renderTools();
   connect();
 }
@@ -1111,6 +1302,7 @@ function bindUi() {
   els.undo.addEventListener("click", () => send({ type: "undo" }));
   els.redo.addEventListener("click", () => send({ type: "redo" }));
   els.fit.addEventListener("click", fitView);
+  els.extend.addEventListener("click", () => send({ type: "extend" }));
   els.chatToggle.addEventListener("click", () => {
     els.chat.classList.toggle("chat-closed");
     els.chat.classList.toggle("chat-open");

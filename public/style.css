@@ -248,18 +248,50 @@ button:disabled { opacity: 0.4; cursor: default; }
 #desk.panning.dragging { cursor: grabbing; }
 #paper-wrap {
   position: absolute;
-  width: 1600px;
+  width: 1600px; /* 由 JS 按段数设置 */
   height: 1000px;
   transform-origin: 0 0;
   box-shadow: 0 14px 40px rgba(40, 30, 20, 0.22);
 }
-#paper-wrap canvas {
+#paper-wrap.gliding { transition: transform 0.35s ease; }
+.tile {
+  position: absolute;
+  top: 0;
+  width: 1600px;
+  height: 1000px;
+}
+.tile canvas {
   position: absolute;
   left: 0;
   top: 0;
   width: 1600px;
   height: 1000px;
 }
+/* 卷轴末端：点一下接出新的一段。尺寸用画布单位，随缩放一起变 */
+#btn-extend {
+  position: absolute;
+  top: 0;
+  width: 140px;
+  height: 1000px;
+  display: flex;
+  flex-direction: row; /* 竖排模式下 row 是自上而下：「＋」在上，字在下 */
+  align-items: center;
+  justify-content: center;
+  gap: 18px;
+  background: rgba(243, 237, 226, 0.28);
+  border: 4px dashed rgba(80, 60, 40, 0.3);
+  border-radius: 0;
+  color: var(--muted);
+  font-size: 34px;
+  letter-spacing: 0.3em;
+  writing-mode: vertical-rl;
+}
+#btn-extend:hover {
+  background: rgba(243, 237, 226, 0.6);
+  border-color: var(--me, var(--line));
+  color: var(--ink);
+}
+#btn-extend .plus { font-size: 56px; letter-spacing: 0; }
 #cursors {
   position: absolute;
   inset: 0;

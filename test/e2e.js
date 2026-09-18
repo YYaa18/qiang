@@ -468,6 +468,61 @@ async function main() {
       assert(presence.users.every((u) => u.id !== bId), "seat released");
     });
 
+    await test("wall extends as a horizontal scroll", async () => {
+      const hostId = uuid();
+      const code = await createRoom(port, hostId);
+      const a = track(await join(port, { code, name: "甲", clientId: hostId }));
+      const asnap = await a.wait("snapshot");
+      assert(asnap.segments === 1, "starts with one segment");
+      const b = track(await join(port, { code, name: "乙", clientId: uuid() }));
+      const bsnap = await b.wait("snapshot");
+
+      // 接长前，点被钳制在第一段（+余量）以内
+      const s1 = uuid();
+      b.send({ type: "stroke_start", id: s1, strokeType: "pen", color: bsnap.you.color, width: 8, x: 1500, y: 500 });
+      b.send({ type: "stroke_point", id: s1, points: [{ x: 2500, y: 500 }] });
+      b.send({ type: "stroke_end", id: s1 });
+      const e1 = await b.wait((m) => m.type === "stroke_end" && m.id === s1);
+      assert(e1.stroke.points[1].x === 1640, "clamped to first segment, got " + e1.stroke.points[1].x);
+
+      b.send({ type: "extend" });
+      const ext = await a.wait("extend");
+      assert(ext.segments === 2 && ext.userId === bsnap.you.id, "extend broadcast");
+      await a.wait((m) => m.type === "chat" && /接长了一段/.test(m.message.text));
+
+      // 接长后可以画在第二段
+      const s2 = uuid();
+      b.send({ type: "stroke_start", id: s2, strokeType: "pen", color: bsnap.you.color, width: 8, x: 2500, y: 500 });
+      b.send({ type: "stroke_point", id: s2, points: [{ x: 3100, y: 500 }] });
+      b.send({ type: "stroke_end", id: s2 });
+      const e2 = await b.wait((m) => m.type === "stroke_end" && m.id === s2);
+      assert(e2.stroke.points[0].x === 2500 && e2.stroke.points[1].x === 3100, "second segment usable");
+
+      // 锁定后访客不能接长，房主可以
+      a.send({ type: "lock" });
+      await b.wait("lock");
+      b.send({ type: "extend" });
+      const err = await b.wait("error");
+      assert(err.code === "locked", "guest blocked while locked");
+      a.send({ type: "extend" });
+      const ext3 = await b.wait((m) => m.type === "extend" && m.segments === 3);
+      assert(ext3.segments === 3, "host can extend while locked");
+
+      // 上限 20 段
+      for (let i = 3; i < 20; i++) {
+        a.send({ type: "extend" });
+        await a.wait((m) => m.type === "extend" && m.segments === i + 1);
+      }
+      a.send({ type: "extend" });
+      const maxErr = await a.wait("error");
+      assert(maxErr.code === "max_length", "stops at 20 segments");
+
+      // 新进来的人拿到的快照里有段数
+      const c = track(await join(port, { code, name: "丙", clientId: uuid() }));
+      const csnap = await c.wait("snapshot");
+      assert(csnap.segments === 20, "snapshot carries segments");
+    });
+
     await test("strokes persist across server restart", async () => {
       const hostId = uuid();
       const code = await createRoom(port, hostId);
@@ -488,6 +543,8 @@ async function main() {
       await a.wait((m) => m.type === "stroke_end" && m.id === sid);
       a.send({ type: "chat", text: "还在" });
       await a.wait((m) => m.type === "chat" && m.message && m.message.text === "还在");
+      a.send({ type: "extend" });
+      await a.wait("extend");
 
       for (const c of clients) c.close();
       await stopServer(proc);
@@ -505,6 +562,7 @@ async function main() {
       assert(found.points && found.points.length >= 2, "points restored");
       assert(snap.chat.some((m) => m.text === "还在"), "chat restored");
       assert(snap.you.canUndo === true, "can undo own stroke after restart");
+      assert(snap.segments === 2, "segments restored, got " + snap.segments);
     });
   } finally {
     for (const c of clients) {
