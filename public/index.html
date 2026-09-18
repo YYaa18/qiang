@@ -1,0 +1,116 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>墙</title>
+  <link rel="stylesheet" href="/style.css" />
+</head>
+<body>
+  <div id="lobby" class="screen">
+    <div class="lobby-card">
+      <h1>墙</h1>
+      <p class="tagline">不用注册。四个人。电脑。</p>
+      <label class="field">
+        <span>怎么称呼你</span>
+        <input id="nick-input" maxlength="16" placeholder="朋友" autocomplete="nickname" />
+      </label>
+      <button type="button" id="btn-create" class="btn-primary">砌一面墙</button>
+      <form id="join-form" class="join-row">
+        <input id="code-input" maxlength="4" placeholder="房间码" spellcheck="false" autocomplete="off" />
+        <button type="submit" class="btn-secondary">推门</button>
+      </form>
+      <p id="lobby-error" class="error" hidden></p>
+    </div>
+  </div>
+
+  <div id="wall" class="screen" hidden>
+    <header id="topbar">
+      <div class="top-left">
+        <span id="room-code" class="mono"></span>
+        <button type="button" id="btn-copy" title="复制链接">复制链接</button>
+        <span id="presence-count">在场 0/4</span>
+      </div>
+      <div class="top-right">
+        <span id="lock-badge" hidden>已锁</span>
+        <div class="menu-wrap">
+          <button type="button" id="btn-menu" title="更多">⋯</button>
+          <div id="menu" class="menu" hidden>
+            <button type="button" id="menu-export">导出 PNG</button>
+            <button type="button" id="menu-lock" class="host-only" hidden>锁定画布</button>
+            <button type="button" id="menu-clear" class="host-only" hidden>清空这面墙</button>
+            <button type="button" id="menu-rename">改名字</button>
+            <p id="kick-hint" class="host-only menu-hint" hidden>在名单旁点「请离」可将朋友请出</p>
+          </div>
+        </div>
+      </div>
+    </header>
+
+    <div id="workspace">
+      <aside id="toolbar">
+        <button type="button" class="tool" data-tool="pen" title="笔">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 20l1.2-4.2L16.8 4.2a2 2 0 0 1 2.8 0l.2.2a2 2 0 0 1 0 2.8L8.2 18.8z" fill="none" stroke="currentColor" stroke-width="1.7"/></svg>
+        </button>
+        <button type="button" class="tool" data-tool="eraser" title="橡皮">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="5" y="8" width="14" height="9" rx="1.2" transform="rotate(-20 12 12)" fill="none" stroke="currentColor" stroke-width="1.7"/></svg>
+        </button>
+        <button type="button" class="tool" data-tool="text" title="字">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6h12M12 6v13" fill="none" stroke="currentColor" stroke-width="1.7"/></svg>
+        </button>
+        <div class="sep"></div>
+        <button type="button" class="width-btn" data-size="0" title="细"><span class="dot d1"></span></button>
+        <button type="button" class="width-btn" data-size="1" title="中"><span class="dot d2"></span></button>
+        <button type="button" class="width-btn" data-size="2" title="粗"><span class="dot d3"></span></button>
+        <div class="sep"></div>
+        <div id="swatches"></div>
+        <div class="sep"></div>
+        <button type="button" id="btn-undo" title="撤销"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M8 8H5l4-4M5 8c2.8-3 12-4 14 4" fill="none" stroke="currentColor" stroke-width="1.7"/></svg></button>
+        <button type="button" id="btn-redo" title="重做"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M16 8h3l-4-4M19 8c-2.8-3-12-4-14 4" fill="none" stroke="currentColor" stroke-width="1.7"/></svg></button>
+        <button type="button" id="btn-fit" title="回正"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 9V4h5M20 9V4h-5M4 15v5h5M20 15v5h-5" fill="none" stroke="currentColor" stroke-width="1.7"/></svg></button>
+      </aside>
+
+      <main id="desk">
+        <div id="paper-wrap">
+          <canvas id="paper"></canvas>
+          <canvas id="ink"></canvas>
+          <canvas id="live"></canvas>
+          <div id="cursors"></div>
+          <input id="text-box" maxlength="80" hidden />
+        </div>
+      </main>
+
+      <aside id="chat" class="chat-open">
+        <button type="button" id="chat-toggle" title="折叠聊天">‹</button>
+        <div id="chat-body">
+          <div id="roster"></div>
+          <div id="log"></div>
+          <textarea id="chat-input" rows="2" maxlength="200" placeholder="写一句，回车发送"></textarea>
+        </div>
+      </aside>
+    </div>
+
+    <footer id="bottombar">
+      <span id="conn">连接中…</span>
+      <span id="drawing-hint"></span>
+    </footer>
+
+    <div id="clear-overlay" hidden>
+      <div class="clear-card">
+        <p>墙即将被清空</p>
+        <div id="clear-count">5</div>
+        <button type="button" id="btn-clear-cancel" class="host-only" hidden>取消</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="overlay" hidden>
+    <div class="overlay-card">
+      <p id="overlay-text"></p>
+      <button type="button" id="overlay-back" class="btn-primary">回门口</button>
+    </div>
+  </div>
+
+  <div id="toast" hidden></div>
+  <script src="/app.js"></script>
+</body>
+</html>

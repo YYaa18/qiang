@@ -1,0 +1,16 @@
+{
+  "name": "qiang",
+  "version": "0.2.0",
+  "private": true,
+  "description": "墙 — 朋友共用画板",
+  "scripts": {
+    "start": "node server.js",
+    "test": "node test/e2e.js"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "dependencies": {
+    "ws": "^8.18.3"
+  }
+}
