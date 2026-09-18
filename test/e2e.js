@@ -515,6 +515,23 @@ async function main() {
       assert(!a.msgs.some((m) => m.type === "stroke_start" && m.stroke.id !== ok), "invalid colors rejected");
     });
 
+    await test("leaving frees the seat right away", async () => {
+      const hostId = uuid();
+      const code = await createRoom(port, hostId);
+      const a = track(await join(port, { code, name: "甲", clientId: hostId }));
+      await a.wait("snapshot");
+      const b = track(await join(port, { code, name: "乙", clientId: uuid() }));
+      await b.wait("snapshot");
+      await a.wait((m) => m.type === "presence" && m.users.length === 2);
+      const t0 = Date.now();
+      b.send({ type: "leave" });
+      const p = await a.wait((m) => m.type === "presence" && m.users.length === 1, 2000);
+      assert(p.users[0].id === hostId, "only host remains");
+      assert(Date.now() - t0 < 1500, "no 10s grace for an explicit leave");
+      await a.wait((m) => m.type === "chat" && m.message.text === "乙走了");
+      await b.closed;
+    });
+
     await test("host can kick a guest", async () => {
       const hostId = uuid();
       const code = await createRoom(port, hostId);

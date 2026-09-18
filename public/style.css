@@ -376,6 +376,11 @@ button:disabled { opacity: 0.4; cursor: default; }
   overflow: hidden;
   background: var(--desk);
   cursor: crosshair;
+  /* 触屏上的拖动、捏合都由页面自己处理，不让浏览器滚动或缩放页面 */
+  touch-action: none;
+  -webkit-user-select: none;
+  user-select: none;
+  -webkit-touch-callout: none;
 }
 #desk.panning { cursor: grab; }
 #desk.panning.dragging { cursor: grabbing; }
@@ -778,4 +783,104 @@ button:disabled { opacity: 0.4; cursor: default; }
   bottom: -1px;
   border: 2px solid var(--me, var(--ink));
   pointer-events: none;
+}
+
+/* ───────────── 手机 ───────────── */
+.mobile-only { display: none; }
+.badge {
+  min-width: 16px;
+  margin-left: 4px;
+  padding: 0 4px;
+  background: var(--danger);
+  color: var(--paper);
+  font-size: 10px;
+  font-family: var(--mono);
+  line-height: 16px;
+  text-align: center;
+}
+
+@media (max-width: 760px) {
+  .mobile-only { display: inline-flex; align-items: center; }
+  .menu .mobile-only { display: block; }
+  #tip { display: none !important; }
+
+  /* 门口 */
+  .lobby-card { width: calc(100vw - 32px); max-width: 360px; padding: 28px 20px 24px; }
+  .field input, #code-input, #nick-input, #chat-input, #pal-hex { font-size: 16px; } /* 小于 16px 时 iOS 会自动放大页面 */
+
+  /* 墙：顶栏 / 画布 / 底部工具条 / 底栏 */
+  #wall { height: 100dvh; }
+  #topbar {
+    grid-template-columns: auto 1fr auto;
+    gap: 6px;
+    padding: 0 6px 0 10px;
+    padding-top: env(safe-area-inset-top);
+    height: calc(var(--bar-h) + env(safe-area-inset-top));
+  }
+  #btn-copy { display: none; }
+  #seats { justify-self: center; gap: 3px; }
+  .seat { height: 26px; padding: 0 7px; }
+  .seat .who, .seat .tag, .seat.empty span:not(.pdot), .seat .kick-btn { display: none !important; }
+  .top-right { gap: 2px; }
+  .top-right .btn-ghost { padding: 6px 8px; }
+
+  #workspace { flex-direction: column; }
+  #desk { order: 1; }
+  #toolbar {
+    order: 2;
+    width: 100%;
+    height: 54px;
+    flex-direction: row;
+    align-items: center;
+    padding: 0 8px;
+    gap: 2px;
+    overflow-x: auto;
+    overflow-y: hidden;
+    border-right: none;
+    border-top: 1px solid var(--hairline);
+    scrollbar-width: none;
+  }
+  #toolbar::-webkit-scrollbar { display: none; }
+  #toolbar > * { flex-shrink: 0; }
+  #toolbar .sep { width: 1px; height: 24px; margin: 0 6px; }
+  #toolbar #btn-palette { margin-top: 0; }
+  #swatches { flex-direction: row; gap: 6px; }
+  .swatch { width: 26px; height: 26px; }
+
+  /* 聊天：从底部弹出的面板，盖在画布上 */
+  #chat {
+    position: fixed;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    width: auto;
+    height: 62dvh;
+    z-index: 40;
+    border-left: none;
+    border-top: 1px solid var(--line);
+    box-shadow: 0 -12px 32px rgba(40, 30, 20, 0.22);
+    padding-bottom: env(safe-area-inset-bottom);
+  }
+  #chat.chat-closed { display: none; }
+  #chat-rail { display: none !important; }
+  .composer-foot span:first-child { display: none; }
+
+  #bottombar {
+    height: calc(26px + env(safe-area-inset-bottom));
+    padding-bottom: env(safe-area-inset-bottom);
+  }
+  #drawing-hint { display: none; }
+  #seg-track { width: 96px; }
+
+  /* 调色板：贴着底部工具条，左右留边 */
+  #palette {
+    left: 8px !important;
+    right: 8px;
+    top: auto !important;
+    bottom: calc(92px + env(safe-area-inset-bottom));
+    width: auto;
+  }
+  .pal-sw { min-height: 32px; }
+  #menu { right: 0; min-width: 150px; }
+  .menu button { padding: 12px 14px; }
 }

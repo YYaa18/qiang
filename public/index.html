@@ -2,7 +2,7 @@
 <html lang="zh-CN">
 <head>
   <meta charset="UTF-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
   <title>墙</title>
   <link rel="stylesheet" href="/style.css" />
 </head>
@@ -36,9 +36,12 @@
       <div id="seats" aria-label="在场的人"></div>
       <div class="top-right">
         <span id="lock-badge" hidden>已锁</span>
+        <button type="button" id="btn-chat-mobile" class="btn-ghost mobile-only" aria-label="聊天">聊天<span id="unread-m" class="badge" hidden></span></button>
+        <button type="button" id="btn-leave" class="btn-ghost" title="离开这面墙，回到门口">离开</button>
         <div class="menu-wrap">
           <button type="button" id="btn-menu" class="btn-ghost" title="更多" aria-label="更多">⋯</button>
           <div id="menu" class="menu" hidden>
+            <button type="button" id="menu-copy" class="mobile-only">复制链接</button>
             <button type="button" id="menu-export">导出 PNG</button>
             <button type="button" id="menu-rename">改名字</button>
             <button type="button" id="menu-lock" class="host-only" hidden>锁定画布</button>

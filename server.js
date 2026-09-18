@@ -1098,6 +1098,26 @@ function handleKick(ws, msg) {
   scheduleSave(room);
 }
 
+// 主动离开：立刻释放座位并提示，不等 10 秒宽限期（宽限期是给刷新和断网用的）
+function handleLeave(ws) {
+  const ctx = ctxOf(ws);
+  if (!ctx) return;
+  const { room, user } = ctx;
+  finishOpenStrokes(room, user.id);
+  if (room.job && room.job.baker === user.id) abortJob(room, "baker left");
+  if (user.timer) clearTimeout(user.timer);
+  user.ws = null;
+  room.users.delete(user.id);
+  pushSystem(room, `${user.name}走了`);
+  broadcast(room, { type: "presence", users: publicUsers(room) });
+  scheduleSave(room);
+  try {
+    ws.close();
+  } catch {
+    /* ignore */
+  }
+}
+
 function handleRename(ws, msg) {
   const ctx = ctxOf(ws);
   if (!ctx) return;
@@ -1169,6 +1189,9 @@ function handleMessage(ws, raw) {
       break;
     case "kick":
       handleKick(ws, msg);
+      break;
+    case "leave":
+      handleLeave(ws);
       break;
     case "rename":
       handleRename(ws, msg);

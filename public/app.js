@@ -93,6 +93,10 @@ const els = {
   overlayText: $("overlay-text"),
   overlayBack: $("overlay-back"),
   toast: $("toast"),
+  leave: $("btn-leave"),
+  chatMobile: $("btn-chat-mobile"),
+  unreadM: $("unread-m"),
+  menuCopy: $("menu-copy"),
   tip: $("tip"),
   arrivals: $("arrivals"),
 };
@@ -391,9 +395,16 @@ function drawStroke(ctx, s) {
     ctx.arc(pts[0].x, pts[0].y, s.width / 2, 0, Math.PI * 2);
     ctx.fill();
   } else {
+    // 过相邻两点的中点画二次曲线，折线变圆滑；首尾仍落在真实的点上
     ctx.beginPath();
     ctx.moveTo(pts[0].x, pts[0].y);
-    for (let i = 1; i < pts.length; i++) ctx.lineTo(pts[i].x, pts[i].y);
+    for (let i = 1; i < pts.length - 1; i++) {
+      const mx = (pts[i].x + pts[i + 1].x) / 2;
+      const my = (pts[i].y + pts[i + 1].y) / 2;
+      ctx.quadraticCurveTo(pts[i].x, pts[i].y, mx, my);
+    }
+    const end = pts[pts.length - 1];
+    ctx.lineTo(end.x, end.y);
     ctx.stroke();
   }
   ctx.restore();
@@ -683,11 +694,13 @@ function canDraw() {
   return !!(state.ws && state.ws.readyState === WebSocket.OPEN);
 }
 
-function startStroke(p) {
+// 手指落下后这么久内来了第二根手指，就当作双指手势：这一笔撤回，不发出去
+const TOUCH_GRACE_MS = 120;
+
+function startStroke(p, pending = false) {
   if (!canDraw()) return;
-  const id = uuid();
   const stroke = {
-    id,
+    id: uuid(),
     seq: 1e12,
     userId: state.you.id,
     type: state.tool === "eraser" ? "eraser" : "pen",
@@ -696,32 +709,67 @@ function startStroke(p) {
     points: [p],
     hidden: false,
     t: Date.now(),
+    pending,
   };
   state.current = stroke;
   state.drawing = true;
   state.pointBuf = [];
-  send({
-    type: "stroke_start",
-    id,
-    strokeType: stroke.type,
-    color: stroke.color,
-    width: stroke.width,
-    x: p.x,
-    y: p.y,
-  });
+  if (pending) state.pendingTimer = setTimeout(commitPending, TOUCH_GRACE_MS);
+  else sendStart(stroke);
   redrawLive();
 }
 
-function moveStroke(p) {
-  if (!state.drawing || !state.current) return;
-  state.current.points.push(p);
-  state.pointBuf.push(p);
-  if (state.pointBuf.length >= 8) flushPoints();
+function sendStart(stroke) {
+  const [p] = stroke.points;
+  send({ type: "stroke_start", id: stroke.id, strokeType: stroke.type, color: stroke.color, width: stroke.width, x: p.x, y: p.y });
+}
+
+// 触屏的一笔过了等待期还是单指：正式发出去，把攒下的点一并补上
+function commitPending() {
+  clearTimeout(state.pendingTimer);
+  const s = state.current;
+  if (!s || !s.pending) return;
+  s.pending = false;
+  sendStart(s);
+  state.pointBuf = s.points.slice(1);
+  flushPoints();
+}
+
+function cancelStroke() {
+  clearTimeout(state.pendingTimer);
+  state.current = null;
+  state.drawing = false;
+  state.pointBuf = [];
   redrawLive();
+}
+
+// 一次事件可能带来多个采样点（getCoalescedEvents）；太近的点丢掉，重绘合并到下一帧
+function addPoints(pts) {
+  const s = state.current;
+  if (!state.drawing || !s) return;
+  const minD = 0.75 / state.scale; // 屏幕上不到 0.75 像素的移动不记
+  let last = s.points[s.points.length - 1];
+  for (const p of pts) {
+    if (Math.hypot(p.x - last.x, p.y - last.y) < minD) continue;
+    s.points.push(p);
+    if (!s.pending) state.pointBuf.push(p);
+    last = p;
+  }
+  if (!s.pending && state.pointBuf.length >= 8) flushPoints();
+  scheduleLive();
+}
+
+let liveFrame = 0;
+function scheduleLive() {
+  if (liveFrame) return;
+  liveFrame = requestAnimationFrame(() => {
+    liveFrame = 0;
+    redrawLive();
+  });
 }
 
 function flushPoints() {
-  if (!state.current || !state.pointBuf.length) return;
+  if (!state.current || state.current.pending || !state.pointBuf.length) return;
   send({ type: "stroke_point", id: state.current.id, points: state.pointBuf });
   state.pointBuf = [];
 }
@@ -731,6 +779,7 @@ function endStroke() {
     state.drawing = false;
     return;
   }
+  if (state.current.pending) commitPending(); // 轻点一下也算一笔（一个点）
   flushPoints();
   send({ type: "stroke_end", id: state.current.id });
   const done = state.current;
@@ -1140,8 +1189,15 @@ function onChatMessage(m) {
 }
 
 function updateUnread() {
-  els.unread.hidden = state.unread === 0;
-  els.unread.textContent = state.unread > 99 ? "99+" : String(state.unread);
+  const text = state.unread > 99 ? "99+" : String(state.unread);
+  for (const el of [els.unread, els.unreadM]) {
+    el.hidden = state.unread === 0;
+    el.textContent = text;
+  }
+}
+
+function isMobile() {
+  return window.matchMedia("(max-width: 760px)").matches;
 }
 
 function setChatOpen(open) {
@@ -1526,18 +1582,77 @@ function onKeyUp(e) {
   }
 }
 
+// 触屏：单指画，双指平移 + 捏合缩放。用过手写笔后，手指只负责拖动（防手掌误触）
+const touches = new Map(); // pointerId → { x, y }
+let gesture = null;
+
+function startGesture() {
+  const [a, b] = [...touches.values()];
+  gesture = {
+    dist: Math.hypot(a.x - b.x, a.y - b.y) || 1,
+    mx: (a.x + b.x) / 2,
+    my: (a.y + b.y) / 2,
+    scale: state.scale,
+    panX: state.panX,
+    panY: state.panY,
+  };
+}
+
+function updateGesture() {
+  const [a, b] = [...touches.values()];
+  const r = els.desk.getBoundingClientRect();
+  const { min, max } = scaleLimits();
+  const scale = Math.max(min, Math.min(max, (gesture.scale * Math.hypot(a.x - b.x, a.y - b.y)) / gesture.dist));
+  // 起手时两指中点下的那一点，跟着两指的新中点走
+  const cx = (gesture.mx - r.left - gesture.panX) / gesture.scale;
+  const cy = (gesture.my - r.top - gesture.panY) / gesture.scale;
+  state.scale = scale;
+  state.panX = (a.x + b.x) / 2 - r.left - cx * scale;
+  state.panY = (a.y + b.y) / 2 - r.top - cy * scale;
+  applyView();
+}
+
+// 指针已失效等情况下 setPointerCapture 会抛异常，不能让它打断后面的处理
+function capturePointer(e) {
+  try {
+    els.desk.setPointerCapture(e.pointerId);
+  } catch {
+    /* 不捕获也能画，只是拖出画布区域后收不到事件 */
+  }
+}
+
+function startPan(e) {
+  state.panning = true;
+  state.panStart = { x: e.clientX, y: e.clientY, px: state.panX, py: state.panY };
+  els.desk.classList.add("panning", "dragging");
+  capturePointer(e);
+}
+
 function onPointerDown(e) {
   if (e.target === els.textBox) return;
   if (!els.textBox.hidden) {
     if (els.textBox.value.trim()) commitText();
     else cancelText();
   }
-  if (e.button === 1 || (e.button === 0 && state.space)) {
+  if (e.pointerType === "pen") state.penSeen = true;
+  if (e.pointerType === "touch") {
+    touches.set(e.pointerId, { x: e.clientX, y: e.clientY });
+    capturePointer(e);
+    if (touches.size >= 2) {
+      // 第二根手指到了：还没发出去的那一笔撤回；已经在画的就收笔
+      if (state.current && state.current.pending) cancelStroke();
+      else if (state.drawing) endStroke();
+      state.panning = false;
+      startGesture();
+      return;
+    }
+    if (state.penSeen) {
+      startPan(e);
+      return;
+    }
+  } else if (e.button === 1 || (e.button === 0 && state.space)) {
     e.preventDefault();
-    state.panning = true;
-    state.panStart = { x: e.clientX, y: e.clientY, px: state.panX, py: state.panY };
-    els.desk.classList.add("panning", "dragging");
-    els.desk.setPointerCapture(e.pointerId);
+    startPan(e);
     return;
   }
   if (e.button !== 0) return;
@@ -1549,35 +1664,55 @@ function onPointerDown(e) {
     placeText(p);
     return;
   }
-  startStroke(p);
-  els.desk.setPointerCapture(e.pointerId);
+  startStroke(p, e.pointerType === "touch");
+  capturePointer(e);
 }
 
 function onPointerMove(e) {
+  if (e.pointerType === "touch" && touches.has(e.pointerId)) {
+    touches.set(e.pointerId, { x: e.clientX, y: e.clientY });
+    if (gesture) {
+      if (touches.size >= 2) updateGesture();
+      return; // 双指手势结束后，剩下那根手指抬起前什么也不做
+    }
+  }
   if (state.panning && state.panStart) {
     state.panX = state.panStart.px + (e.clientX - state.panStart.x);
     state.panY = state.panStart.py + (e.clientY - state.panStart.y);
     applyView();
     return;
   }
-  const p0 = toCanvas(e);
-  if (!p0) return;
+  const r = els.wrap.getBoundingClientRect();
+  const at = (ev) => ({ x: (ev.clientX - r.left) / state.scale, y: (ev.clientY - r.top) / state.scale });
+  const p0 = at(e);
   const now = Date.now();
   if (now - state.lastCursor >= 50) {
     state.lastCursor = now;
     const c = clip(p0);
     send({ type: "cursor", x: c.x, y: c.y });
   }
-  if (state.drawing) moveStroke(clipStroke(p0));
+  if (state.drawing) {
+    // 浏览器会把一帧内的多次采样合并成一次事件；拿回全部采样点，快速画线和手写笔都更顺
+    const evs = typeof e.getCoalescedEvents === "function" ? e.getCoalescedEvents() : [];
+    addPoints((evs.length ? evs : [e]).map((ev) => clipStroke(at(ev))));
+  }
 }
 
 function onPointerUp(e) {
+  if (e.pointerType === "touch") {
+    touches.delete(e.pointerId);
+    if (touches.size === 0) gesture = null;
+    else if (gesture) return;
+  }
   if (state.panning) {
     state.panning = false;
     els.desk.classList.remove("dragging");
     if (!state.space) els.desk.classList.remove("panning");
   }
-  if (state.drawing) endStroke();
+  if (!state.drawing) return;
+  // 系统打断了触摸（来电、手势导航）时，没发出去的那一笔直接丢掉
+  if (e.type === "pointercancel" && state.current && state.current.pending) cancelStroke();
+  else endStroke();
 }
 
 function onWheel(e) {
@@ -1700,6 +1835,7 @@ function enterWall(code) {
   state.segments = 1;
   setupTiles();
   resetView();
+  if (isMobile() && state.chatOpen) setChatOpen(false); // 手机上聊天默认收起，画布优先
   renderTools();
   connect();
 }
@@ -1818,6 +1954,7 @@ function tipTargetOf(node) {
 // 第一次悬停等 0.35 秒；提示已经出来时，在按钮间移动立刻切换
 function bindTips() {
   els.toolbar.addEventListener("pointerover", (e) => {
+    if (e.pointerType === "touch") return; // 手指点按钮不弹提示
     const t = tipTargetOf(e.target);
     if (!t || t === tip.shown || t === tip.pending) return;
     clearTimeout(tip.timer);
@@ -1842,6 +1979,32 @@ function bindTips() {
   window.addEventListener("blur", hideTip);
 }
 
+async function copyLink() {
+  const url = `${location.origin}/w/${state.code}`;
+  try {
+    await navigator.clipboard.writeText(url);
+    toast("已复制链接");
+  } catch {
+    // http://IP 访问时没有 clipboard API，退回老办法
+    const ta = document.createElement("textarea");
+    ta.value = url;
+    ta.style.cssText = "position:fixed;opacity:0";
+    document.body.appendChild(ta);
+    ta.select();
+    const ok = document.execCommand("copy");
+    ta.remove();
+    toast(ok ? "已复制链接" : url);
+  }
+}
+
+// 主动离开：告诉服务端立刻释放座位，回到门口；房间码留在输入框里，想回来点「推门」就行
+function leaveWall() {
+  const code = state.code;
+  send({ type: "leave" });
+  goLobby("");
+  els.codeInput.value = code || "";
+}
+
 function bindUi() {
   els.nick.value = loadName();
   els.create.addEventListener("click", createRoom);
@@ -1849,23 +2012,13 @@ function bindUi() {
     if (e.key === "Enter" && !isImeEnter(e) && els.codeInput.value.trim()) tryJoinFromForm(e);
   });
   els.joinForm.addEventListener("submit", tryJoinFromForm);
-  els.copy.addEventListener("click", async () => {
-    const url = `${location.origin}/w/${state.code}`;
-    try {
-      await navigator.clipboard.writeText(url);
-      toast("已复制链接");
-    } catch {
-      // http://IP 访问时没有 clipboard API，退回老办法
-      const ta = document.createElement("textarea");
-      ta.value = url;
-      ta.style.cssText = "position:fixed;opacity:0";
-      document.body.appendChild(ta);
-      ta.select();
-      const ok = document.execCommand("copy");
-      ta.remove();
-      toast(ok ? "已复制链接" : url);
-    }
+  els.copy.addEventListener("click", copyLink);
+  els.menuCopy.addEventListener("click", () => {
+    els.menu.hidden = true;
+    copyLink();
   });
+  els.leave.addEventListener("click", leaveWall);
+  els.chatMobile.addEventListener("click", () => setChatOpen(!state.chatOpen));
   els.menuBtn.addEventListener("click", (e) => {
     e.stopPropagation();
     els.menu.hidden = !els.menu.hidden;
