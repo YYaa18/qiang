@@ -451,6 +451,28 @@ async function main() {
       assert(start.stroke.userId === hostId, "host can still draw");
     });
 
+    await test("pen color is free choice, but must be a hex color", async () => {
+      const hostId = uuid();
+      const code = await createRoom(port, hostId);
+      const a = track(await join(port, { code, name: "甲", clientId: hostId }));
+      await a.wait("snapshot");
+      const ok = uuid();
+      a.send({ type: "stroke_start", id: ok, strokeType: "pen", color: "#7048e8", width: 8, x: 10, y: 10 });
+      const st = await a.wait((m) => m.type === "stroke_start" && m.stroke.id === ok);
+      assert(st.stroke.color === "#7048E8", "custom color accepted and normalized, got " + st.stroke.color);
+      a.send({ type: "stroke_end", id: ok });
+      await a.wait((m) => m.type === "stroke_end" && m.id === ok);
+      a.send({ type: "text_place", id: uuid(), color: "#0CA678", text: "青", x: 20, y: 20 });
+      const tp = await a.wait("text_place");
+      assert(tp.stroke.color === "#0CA678", "custom text color accepted");
+      for (const bad of ["red", "#12345", "javascript:alert(1)"]) {
+        a.send({ type: "stroke_start", id: uuid(), strokeType: "pen", color: bad, width: 8, x: 10, y: 10 });
+      }
+      a.send({ type: "chat", text: "sentinel" });
+      await a.wait((m) => m.type === "chat" && m.message.text === "sentinel");
+      assert(!a.msgs.some((m) => m.type === "stroke_start" && m.stroke.id !== ok), "invalid colors rejected");
+    });
+
     await test("host can kick a guest", async () => {
       const hostId = uuid();
       const code = await createRoom(port, hostId);

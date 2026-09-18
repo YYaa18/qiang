@@ -11,6 +11,22 @@ const TEXT_FONT = '22px "PingFang SC","Microsoft YaHei",sans-serif';
 const PEN_WIDTHS = [3, 8, 18];
 const ERASER_WIDTHS = [8, 18, 36];
 const NEUTRALS = ["#1A1A1A", "#FFFFFF", "#868E96"];
+// 主色用于色点和笔迹；写成文字时换成更深一档，保证在浅底上可读（对比度 ≥ 4.5）
+const TEXT_COLOR = {
+  "#C43C3C": "#B03030",
+  "#3B5BDB": "#3552C8",
+  "#2F9E44": "#1E7032",
+  "#E67700": "#945000",
+};
+// 调色板预设：在暖白纸上都好看的 24 色（名字用于悬浮提示）
+const PRESETS = [
+  ["#C92A2A", "深红"], ["#E03131", "红"], ["#F76707", "橙"], ["#F59F00", "琥珀"], ["#FCC419", "黄"], ["#A0522D", "赭"],
+  ["#2B8A3E", "深绿"], ["#40C057", "绿"], ["#82C91E", "草绿"], ["#0CA678", "青绿"], ["#1098AD", "青"], ["#3BC9DB", "浅青"],
+  ["#1864AB", "深蓝"], ["#3B5BDB", "靛"], ["#4DABF7", "天蓝"], ["#7048E8", "紫"], ["#AE3EC9", "品紫"], ["#E64980", "粉"],
+  ["#1A1A1A", "墨"], ["#495057", "深灰"], ["#868E96", "灰"], ["#CED4DA", "浅灰"], ["#FFFFFF", "白"], ["#F3D9B1", "米黄"],
+];
+const LIGHT = new Set(["#FFFFFF", "#CED4DA", "#F3D9B1", "#FCC419", "#3BC9DB"]);
+const STORAGE_RECENT = "qiang.recentColors";
 const STORAGE_ID = "qiang.clientId";
 const STORAGE_NAME = "qiang.name";
 // 笔画点允许超出纸面的余量（与服务端一致），canvas 会自然裁掉超出部分
@@ -28,7 +44,7 @@ const els = {
   lobbyError: $("lobby-error"),
   roomCode: $("room-code"),
   copy: $("btn-copy"),
-  presenceCount: $("presence-count"),
+  seats: $("seats"),
   lockBadge: $("lock-badge"),
   menuBtn: $("btn-menu"),
   menu: $("menu"),
@@ -39,6 +55,13 @@ const els = {
   kickHint: $("kick-hint"),
   toolbar: $("toolbar"),
   swatches: $("swatches"),
+  btnPalette: $("btn-palette"),
+  palette: $("palette"),
+  palGrid: $("pal-grid"),
+  palRecent: $("pal-recent"),
+  palPicker: $("pal-picker"),
+  palHex: $("pal-hex"),
+  palCurrent: $("pal-current"),
   undo: $("btn-undo"),
   redo: $("btn-redo"),
   fit: $("btn-fit"),
@@ -50,7 +73,14 @@ const els = {
   textBox: $("text-box"),
   chat: $("chat"),
   chatToggle: $("chat-toggle"),
-  roster: $("roster"),
+  chatRail: $("chat-rail"),
+  unread: $("unread"),
+  newMsg: $("new-msg"),
+  chatCount: $("chat-count"),
+  segLabel: $("seg-label"),
+  segTrack: $("seg-track"),
+  segView: $("seg-view"),
+  scrollNav: $("scroll-nav"),
   log: $("log"),
   chatInput: $("chat-input"),
   conn: $("conn"),
@@ -62,6 +92,7 @@ const els = {
   overlayText: $("overlay-text"),
   overlayBack: $("overlay-back"),
   toast: $("toast"),
+  tip: $("tip"),
 };
 
 const state = {
@@ -98,6 +129,9 @@ const state = {
   clearDeadline: null,
   clearTick: null,
   replaced: false,
+  chatOpen: true,
+  unread: 0,
+  custom: null, // 最近一次用的自定义色，工具条上留一格方便切回
 };
 
 function getClientId() {
@@ -122,8 +156,13 @@ function pathCode() {
   return m ? m[1].toUpperCase() : null;
 }
 
-function showLobbyError(text) {
+function textColor(c) {
+  return TEXT_COLOR[String(c || "").toUpperCase()] || c || "#1A1A1A";
+}
+
+function showLobbyError(text, kind = "error") {
   els.lobbyError.hidden = !text;
+  els.lobbyError.className = kind;
   els.lobbyError.textContent = text || "";
 }
 
@@ -424,6 +463,36 @@ function applyView() {
   state.scale = Math.max(min, Math.min(max, state.scale));
   clampPan();
   els.wrap.style.transform = `translate(${state.panX}px, ${state.panY}px) scale(${state.scale})`;
+  updateNav();
+}
+
+// 底栏卷轴导航：格子数 = 段数，框出当前看得见的范围
+function updateNav() {
+  const n = state.segments;
+  if (els.segTrack.childElementCount - 1 !== n) {
+    els.segTrack.querySelectorAll(".seg").forEach((el) => el.remove());
+    for (let i = 0; i < n; i++) {
+      const seg = document.createElement("div");
+      seg.className = "seg";
+      els.segTrack.insertBefore(seg, els.segView);
+    }
+  }
+  const deskW = els.desk.clientWidth;
+  const x0 = Math.max(0, -state.panX / state.scale);
+  const x1 = Math.min(wallW(), (deskW - state.panX) / state.scale);
+  els.segView.style.left = `${(x0 / wallW()) * 100}%`;
+  els.segView.style.width = `${(Math.max(0, x1 - x0) / wallW()) * 100}%`;
+  const at = Math.min(n, Math.max(1, Math.floor((x0 + x1) / 2 / SEG_W) + 1));
+  els.segLabel.textContent = `第 ${at} / ${n} 段`;
+}
+
+function jumpTo(frac) {
+  const deskW = els.desk.clientWidth;
+  state.panX = deskW / 2 - frac * wallW() * state.scale;
+  els.wrap.classList.add("gliding");
+  applyView();
+  clearTimeout(jumpTo.t);
+  jumpTo.t = setTimeout(() => els.wrap.classList.remove("gliding"), 400);
 }
 
 // 进墙：纸的高度铺满屏幕，从卷轴最左端开始
@@ -615,13 +684,8 @@ function applySnapshot(snap) {
   state.live.clear();
   state.current = null;
   state.drawing = false;
-  if (state.you && state.you.color) {
-    const allowed = new Set(
-      [state.you.color, ...NEUTRALS].map((c) => c.toUpperCase())
-    );
-    if (!state.color || !allowed.has(String(state.color).toUpperCase())) {
-      state.color = state.you.color;
-    }
+  if (state.you && state.you.color && !isHex(state.color)) {
+    state.color = state.you.color;
   }
   els.roomCode.textContent = snap.code;
   state.segments = Math.min(MAX_SEGMENTS, Math.max(1, Number(snap.segments) || 1));
@@ -656,23 +720,127 @@ function renderTools() {
   els.menuLock.textContent = state.locked ? "解锁画布" : "锁定画布";
 }
 
-function renderSwatches() {
-  const main = (state.you && state.you.color) || "#C43C3C";
-  const colors = [main, ...NEUTRALS];
-  els.swatches.innerHTML = "";
-  for (const c of colors) {
-    const b = document.createElement("button");
-    b.type = "button";
-    b.className = "swatch" + (c === "#FFFFFF" ? " white" : "");
-    b.title = c;
-    b.style.background = c;
-    if (c.toUpperCase() === String(state.color).toUpperCase()) b.classList.add("active");
-    b.addEventListener("click", () => {
-      state.color = c;
-      renderSwatches();
-    });
-    els.swatches.appendChild(b);
+function isHex(c) {
+  return /^#[0-9A-F]{6}$/i.test(String(c || ""));
+}
+
+function baseColors() {
+  return [(state.you && state.you.color) || "#C43C3C", ...NEUTRALS];
+}
+
+function swatchButton(c, cls, title, desc) {
+  const b = document.createElement("button");
+  b.type = "button";
+  b.className = cls + (LIGHT.has(c) ? " light white" : "");
+  if (desc) {
+    b.dataset.tip = title;
+    b.dataset.desc = desc;
+  } else {
+    b.title = title;
   }
+  b.setAttribute("aria-label", title);
+  b.style.background = c;
+  if (c === String(state.color).toUpperCase()) b.classList.add("active");
+  b.addEventListener("click", (e) => {
+    e.stopPropagation();
+    setColor(c);
+    if (cls === "pal-sw") closePalette();
+  });
+  return b;
+}
+
+// 工具条：本人主色 + 黑白灰，外加最近一次的自定义色
+function renderSwatches() {
+  const base = baseColors();
+  const names = ["我的颜色", "墨", "白", "灰"];
+  const descs = [`${base[0]} · 和你的名字同色`, "#1A1A1A", "#FFFFFF · 涂白，盖住下面的笔迹", "#868E96"];
+  els.swatches.innerHTML = "";
+  base.forEach((c, i) => els.swatches.appendChild(swatchButton(c, "swatch", names[i], descs[i])));
+  if (state.custom && !base.includes(state.custom)) {
+    els.swatches.appendChild(swatchButton(state.custom, "swatch", "刚用过的颜色", state.custom));
+  }
+  if (!els.palette.hidden) renderPalette();
+}
+
+function loadRecent() {
+  try {
+    const list = JSON.parse(localStorage.getItem(STORAGE_RECENT) || "[]");
+    return Array.isArray(list) ? list.filter(isHex).slice(0, 6) : [];
+  } catch {
+    return [];
+  }
+}
+
+function rememberColor(c) {
+  if (baseColors().includes(c)) return;
+  const list = [c, ...loadRecent().filter((x) => x !== c)].slice(0, 6);
+  try {
+    localStorage.setItem(STORAGE_RECENT, JSON.stringify(list));
+  } catch {
+    /* 存不了就算了 */
+  }
+}
+
+function setColor(c, remember = true) {
+  c = String(c).toUpperCase();
+  if (!isHex(c)) return;
+  state.color = c;
+  if (!baseColors().includes(c)) state.custom = c;
+  if (remember) rememberColor(c);
+  // 拿着橡皮选颜色，就是想画了
+  if (state.tool === "eraser") {
+    state.tool = "pen";
+    renderTools();
+  }
+  if (!els.textBox.hidden) els.textBox.style.color = c;
+  renderSwatches();
+}
+
+function renderPalette() {
+  els.palGrid.innerHTML = "";
+  for (const [c, name] of PRESETS) els.palGrid.appendChild(swatchButton(c, "pal-sw", `${name} ${c}`));
+  els.palRecent.innerHTML = "";
+  const recent = loadRecent();
+  if (!recent.length) {
+    const empty = document.createElement("span");
+    empty.className = "pal-empty";
+    empty.textContent = "还没有，挑一个试试";
+    els.palRecent.appendChild(empty);
+  }
+  for (const c of recent) els.palRecent.appendChild(swatchButton(c, "pal-sw", c));
+  els.palCurrent.textContent = state.color || "";
+  if (document.activeElement !== els.palPicker) els.palPicker.value = String(state.color || "#1A1A1A").toLowerCase();
+  if (document.activeElement !== els.palHex) {
+    els.palHex.value = state.color || "";
+    els.palHex.classList.remove("bad");
+  }
+}
+
+function openPalette() {
+  hideTip();
+  renderPalette();
+  els.palette.hidden = false;
+  els.btnPalette.classList.add("open");
+  const tb = els.toolbar.getBoundingClientRect();
+  const btn = els.btnPalette.getBoundingClientRect();
+  const h = els.palette.offsetHeight;
+  els.palette.style.left = `${tb.right + 8}px`;
+  els.palette.style.top = `${Math.max(8, Math.min(window.innerHeight - h - 8, btn.top - h / 2))}px`;
+}
+
+function closePalette() {
+  els.palette.hidden = true;
+  els.btnPalette.classList.remove("open");
+}
+
+function applyHex() {
+  let v = els.palHex.value.trim().toUpperCase();
+  if (v && !v.startsWith("#")) v = `#${v}`;
+  if (/^#[0-9A-F]{3}$/.test(v)) v = `#${v[1]}${v[1]}${v[2]}${v[2]}${v[3]}${v[3]}`;
+  const ok = isHex(v);
+  els.palHex.classList.toggle("bad", !ok);
+  if (ok) setColor(v);
+  return ok;
 }
 
 function updateLockUi() {
@@ -682,70 +850,198 @@ function updateLockUi() {
   applyView();
 }
 
-function updateStacks() {
-  els.undo.disabled = !state.canUndo;
-  els.redo.disabled = !state.canRedo;
+// 不用原生 disabled：禁用的按钮收不到悬停，提示就出不来
+function setDisabled(el, off) {
+  el.classList.toggle("is-disabled", off);
+  el.setAttribute("aria-disabled", String(off));
 }
 
+function updateStacks() {
+  setDisabled(els.undo, !state.canUndo);
+  setDisabled(els.redo, !state.canRedo);
+}
+
+// 顶栏四个座位：在场的人是这面墙的主角，空位用虚线占着
 function renderRoster() {
-  els.roster.innerHTML = "";
-  const n = state.users.length;
-  els.presenceCount.textContent = `在场 ${n}/4`;
+  els.seats.innerHTML = "";
   for (const u of state.users) {
-    const row = document.createElement("div");
-    row.className = "person";
+    const seat = document.createElement("div");
+    const me = state.you && u.id === state.you.id;
+    seat.className = "seat" + (me ? " me" : "") + (u.online === false ? " away" : "");
     const dot = document.createElement("span");
     dot.className = "pdot";
     dot.style.background = u.color;
-    const name = document.createElement("span");
-    name.textContent = u.name;
-    row.appendChild(dot);
-    row.appendChild(name);
-    if (state.you && u.id === state.you.id) {
-      const me = document.createElement("span");
-      me.className = "me";
-      me.textContent = "我";
-      row.appendChild(me);
-    } else if (state.you && state.you.isHost) {
+    const who = document.createElement("span");
+    who.className = "who";
+    who.style.color = textColor(u.color);
+    who.textContent = u.name;
+    seat.append(dot, who);
+    const tags = [];
+    if (me) tags.push("我");
+    if (u.host) tags.push("房主");
+    if (u.online === false) tags.push("离开中");
+    if (tags.length) {
+      const tag = document.createElement("span");
+      tag.className = "tag";
+      tag.textContent = tags.join(" · ");
+      seat.appendChild(tag);
+    }
+    if (!me && state.you && state.you.isHost) {
       const k = document.createElement("button");
       k.type = "button";
       k.className = "kick-btn";
       k.textContent = "请离";
+      k.title = `请 ${u.name} 离开这面墙`;
       k.addEventListener("click", () => send({ type: "kick", targetId: u.id }));
-      row.appendChild(k);
+      seat.appendChild(k);
     }
-    els.roster.appendChild(row);
+    els.seats.appendChild(seat);
+  }
+  for (let i = state.users.length; i < 4; i++) {
+    const seat = document.createElement("div");
+    seat.className = "seat empty";
+    seat.innerHTML = '<span class="pdot"></span><span>空位</span>';
+    els.seats.appendChild(seat);
   }
 }
 
-function renderChat(full) {
-  if (full) els.log.innerHTML = "";
-  const start = full ? 0 : Math.max(0, els.log.childElementCount);
-  const list = full ? state.chat : state.chat.slice(start);
-  if (full) {
-    for (const m of state.chat) appendMsg(m);
+const GROUP_GAP = 3 * 60 * 1000; // 同一个人 3 分钟内连续说的话合成一组
+const TIME_GAP = 5 * 60 * 1000; // 相隔 5 分钟以上插一条时间分隔
+
+function hhmm(t) {
+  const d = new Date(t);
+  return `${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`;
+}
+
+function dividerLabel(t) {
+  const d = new Date(t);
+  const now = new Date();
+  const day = (x) => new Date(x.getFullYear(), x.getMonth(), x.getDate()).getTime();
+  const diff = Math.round((day(now) - day(d)) / 86400000);
+  if (diff === 0) return hhmm(t);
+  if (diff === 1) return `昨天 ${hhmm(t)}`;
+  return `${d.getMonth() + 1}月${d.getDate()}日 ${hhmm(t)}`;
+}
+
+function nearBottom() {
+  return els.log.scrollHeight - els.log.scrollTop - els.log.clientHeight < 60;
+}
+
+// 整体重绘聊天记录（最多 100 条，重绘很便宜），分组、合并系统句、插时间分隔
+function renderChat(forceBottom) {
+  const stick = forceBottom || nearBottom();
+  const frag = document.createDocumentFragment();
+  let lastT = 0;
+  let grp = null;
+  let sys = null;
+  const hasHuman = state.chat.some((m) => m.userId !== "system");
+  if (!hasHuman) {
+    const empty = document.createElement("div");
+    empty.className = "chat-empty";
+    empty.textContent = "还没人说话。\n画一笔也算。";
+    empty.style.whiteSpace = "pre-line";
+    frag.appendChild(empty);
+  }
+  for (const m of state.chat) {
+    if (m.t - lastT >= TIME_GAP) {
+      const div = document.createElement("div");
+      div.className = "divider";
+      div.textContent = dividerLabel(m.t);
+      frag.appendChild(div);
+      grp = null;
+      sys = null;
+    }
+    if (m.userId === "system") {
+      grp = null;
+      if (!sys) {
+        sys = document.createElement("div");
+        sys.className = "sys";
+        sys.parts = [];
+        frag.appendChild(sys);
+      }
+      sys.parts.push(`${hhmm(m.t)} ${m.text}`);
+      const shown = sys.parts.length > 4 ? sys.parts.slice(-3) : sys.parts;
+      sys.textContent = (sys.parts.length > 4 ? "… " : "") + shown.map((x) => x.slice(6)).join(" · ");
+      sys.title = sys.parts.join("\n");
+    } else {
+      sys = null;
+      if (!grp || grp.userId !== m.userId || m.t - grp.lastT > GROUP_GAP) {
+        grp = document.createElement("div");
+        grp.className = "grp" + (state.you && m.userId === state.you.id ? " mine" : "");
+        grp.userId = m.userId;
+        grp.style.setProperty("--c", m.color || "#8a8276");
+        const head = document.createElement("div");
+        head.className = "grp-head";
+        const nick = document.createElement("span");
+        nick.className = "nick";
+        nick.style.color = textColor(m.color);
+        nick.textContent = m.name || "朋友";
+        const time = document.createElement("time");
+        time.textContent = hhmm(m.t);
+        head.append(nick, time);
+        grp.appendChild(head);
+        frag.appendChild(grp);
+      }
+      grp.lastT = m.t;
+      const body = document.createElement("p");
+      body.className = "body";
+      body.textContent = m.text;
+      body.title = hhmm(m.t);
+      grp.appendChild(body);
+    }
+    lastT = m.t;
+  }
+  els.log.replaceChildren(frag);
+  if (stick) {
     els.log.scrollTop = els.log.scrollHeight;
-    return;
+    els.newMsg.hidden = true;
   }
-  for (const m of list) appendMsg(m);
 }
 
-function appendMsg(m) {
-  const el = document.createElement("div");
-  el.className = m.userId === "system" ? "msg sys" : "msg";
-  if (m.userId !== "system") {
-    const nick = document.createElement("span");
-    nick.className = "nick";
-    nick.style.color = m.color || "#1A1A1A";
-    nick.textContent = m.name || "朋友";
-    el.appendChild(nick);
+function onChatMessage(m) {
+  state.chat.push(m);
+  if (state.chat.length > 100) state.chat.splice(0, state.chat.length - 100);
+  const mine = state.you && m.userId === state.you.id;
+  const wasNear = nearBottom();
+  renderChat(mine);
+  if (!wasNear && !mine && m.userId !== "system") els.newMsg.hidden = false;
+  if (!state.chatOpen && !mine && m.userId !== "system") {
+    state.unread += 1;
+    updateUnread();
   }
-  const body = document.createElement("span");
-  body.className = "body";
-  body.textContent = m.text;
-  el.appendChild(body);
-  els.log.appendChild(el);
-  els.log.scrollTop = els.log.scrollHeight;
+}
+
+function updateUnread() {
+  els.unread.hidden = state.unread === 0;
+  els.unread.textContent = state.unread > 99 ? "99+" : String(state.unread);
+}
+
+function setChatOpen(open) {
+  state.chatOpen = open;
+  els.chat.classList.toggle("chat-closed", !open);
+  els.chat.classList.toggle("chat-open", open);
+  els.chatRail.hidden = open;
+  if (open) {
+    state.unread = 0;
+    updateUnread();
+    renderChat(true);
+  }
+  fitView();
+}
+
+// 输入框随内容长高（最多约 5 行），接近 200 字时显示字数
+function autosizeChatInput() {
+  const el = els.chatInput;
+  el.style.height = "auto";
+  el.style.height = `${Math.min(el.scrollHeight + 2, 120)}px`;
+  const n = el.value.length;
+  els.chatCount.textContent = n >= 150 ? `${n}/200` : "";
+  els.chatCount.classList.toggle("over", n >= 200);
+}
+
+// 输入法正在选词时按的回车不算数（中文输入必需）
+function isImeEnter(e) {
+  return e.isComposing || e.keyCode === 229;
 }
 
 function setConn(text, kind) {
@@ -895,11 +1191,7 @@ function onMessage(msg) {
       showCursor(msg);
       break;
     case "chat":
-      if (msg.message) {
-        state.chat.push(msg.message);
-        if (state.chat.length > 100) state.chat.splice(0, state.chat.length - 100);
-        appendMsg(msg.message);
-      }
+      if (msg.message) onChatMessage(msg.message);
       break;
     case "lock":
       state.locked = !!msg.locked;
@@ -945,7 +1237,7 @@ function showCursor(msg) {
   const color = (u && u.color) || "#1A1A1A";
   el.querySelector(".dotc").style.background = color;
   el.querySelector(".name").textContent = (u && u.name) || "";
-  el.querySelector(".name").style.color = color;
+  el.querySelector(".name").style.color = textColor(color);
   el.style.left = `${msg.x}px`;
   el.style.top = `${msg.y}px`;
   el.classList.remove("idle");
@@ -989,11 +1281,12 @@ function stopClearUi() {
 
 function inputFocused() {
   const a = document.activeElement;
-  return a === els.chatInput || a === els.textBox || a === els.nick || a === els.codeInput;
+  return !!a && (a.tagName === "INPUT" || a.tagName === "TEXTAREA" || a.isContentEditable);
 }
 
 function onKeyDown(e) {
   if (e.key === "Escape") {
+    closePalette();
     cancelText();
     state.space = false;
     els.desk.classList.remove("panning", "dragging");
@@ -1031,6 +1324,9 @@ function onKeyDown(e) {
   } else if (k === "t") {
     state.tool = "text";
     renderTools();
+  } else if (k === "c") {
+    if (els.palette.hidden) openPalette();
+    else closePalette();
   } else if (k === "[") {
     state.size = Math.max(0, state.size - 1);
     renderTools();
@@ -1240,11 +1536,109 @@ function tryJoinFromForm(e) {
   enterWall(code);
 }
 
+const IS_MAC = /Mac|iPhone|iPad/.test(navigator.platform || navigator.userAgent);
+const tip = { shown: null, pending: null, timer: 0, warmUntil: 0 };
+
+function keyLabels(spec) {
+  if (!spec) return [];
+  if (spec === "[ ]") return ["[", "]"];
+  return spec.split("+").map((k) => {
+    if (k === "mod") return IS_MAC ? "⌘" : "Ctrl";
+    if (k === "shift") return IS_MAC ? "⇧" : "Shift";
+    return k;
+  });
+}
+
+function showTip(target) {
+  clearTimeout(tip.timer);
+  tip.pending = null;
+  tip.shown = target;
+  const el = els.tip;
+  const row = document.createElement("div");
+  row.className = "tip-row";
+  const name = document.createElement("span");
+  name.className = "tip-name";
+  name.textContent = target.dataset.tip;
+  row.appendChild(name);
+  const keys = keyLabels(target.dataset.key);
+  if (keys.length) {
+    const box = document.createElement("span");
+    box.className = "tip-keys";
+    for (const k of keys) {
+      const kbd = document.createElement("kbd");
+      kbd.textContent = k;
+      box.appendChild(kbd);
+    }
+    row.appendChild(box);
+  }
+  el.replaceChildren(row);
+  if (target.dataset.desc) {
+    const desc = document.createElement("div");
+    desc.className = "tip-desc";
+    desc.textContent = target.dataset.desc;
+    el.appendChild(desc);
+  }
+  if (target.classList.contains("is-disabled")) {
+    const note = document.createElement("div");
+    note.className = "tip-note";
+    note.textContent = target === els.undo ? "现在没有可撤销的笔" : "现在没有可重做的笔";
+    el.appendChild(note);
+  }
+  el.hidden = false;
+  el.style.animation = "none";
+  void el.offsetWidth; // 重新播放出现动画
+  el.style.animation = "";
+  const r = target.getBoundingClientRect();
+  const h = el.offsetHeight;
+  el.style.left = `${r.right + 10}px`;
+  el.style.top = `${Math.max(6, Math.min(window.innerHeight - h - 6, r.top + r.height / 2 - h / 2))}px`;
+}
+
+function hideTip() {
+  clearTimeout(tip.timer);
+  tip.pending = null;
+  if (tip.shown) tip.warmUntil = Date.now() + 400;
+  tip.shown = null;
+  els.tip.hidden = true;
+}
+
+function tipTargetOf(node) {
+  const t = node && node.closest ? node.closest("[data-tip]") : null;
+  return t && els.toolbar.contains(t) ? t : null;
+}
+
+// 第一次悬停等 0.35 秒；提示已经出来时，在按钮间移动立刻切换
+function bindTips() {
+  els.toolbar.addEventListener("pointerover", (e) => {
+    const t = tipTargetOf(e.target);
+    if (!t || t === tip.shown || t === tip.pending) return;
+    clearTimeout(tip.timer);
+    if (tip.shown || Date.now() < tip.warmUntil) {
+      showTip(t);
+    } else {
+      tip.pending = t;
+      tip.timer = setTimeout(() => showTip(t), 350);
+    }
+  });
+  els.toolbar.addEventListener("pointerout", (e) => {
+    const from = tipTargetOf(e.target);
+    const to = tipTargetOf(e.relatedTarget);
+    if (from && from !== to) hideTip();
+  });
+  els.toolbar.addEventListener("pointerdown", hideTip);
+  els.toolbar.addEventListener("focusin", (e) => {
+    const t = tipTargetOf(e.target);
+    if (t && t.matches(":focus-visible")) showTip(t);
+  });
+  els.toolbar.addEventListener("focusout", hideTip);
+  window.addEventListener("blur", hideTip);
+}
+
 function bindUi() {
   els.nick.value = loadName();
   els.create.addEventListener("click", createRoom);
   els.nick.addEventListener("keydown", (e) => {
-    if (e.key === "Enter" && els.codeInput.value.trim()) tryJoinFromForm(e);
+    if (e.key === "Enter" && !isImeEnter(e) && els.codeInput.value.trim()) tryJoinFromForm(e);
   });
   els.joinForm.addEventListener("submit", tryJoinFromForm);
   els.copy.addEventListener("click", async () => {
@@ -1262,6 +1656,30 @@ function bindUi() {
   });
   document.addEventListener("click", () => {
     els.menu.hidden = true;
+    closePalette();
+  });
+  els.btnPalette.addEventListener("click", (e) => {
+    e.stopPropagation();
+    if (els.palette.hidden) openPalette();
+    else closePalette();
+  });
+  els.palette.addEventListener("click", (e) => e.stopPropagation());
+  // 拖动取色器时实时预览，松手才记进「最近用过」
+  els.palPicker.addEventListener("input", () => setColor(els.palPicker.value, false));
+  els.palPicker.addEventListener("change", () => {
+    rememberColor(String(els.palPicker.value).toUpperCase());
+    renderPalette();
+  });
+  els.palHex.addEventListener("keydown", (e) => {
+    if (e.key === "Enter" && !isImeEnter(e)) {
+      e.preventDefault();
+      if (applyHex()) closePalette();
+    }
+  });
+  els.palHex.addEventListener("input", () => {
+    const v = els.palHex.value.trim();
+    if (/^#?[0-9A-F]{6}$/i.test(v)) applyHex();
+    else els.palHex.classList.remove("bad");
   });
   els.menu.addEventListener("click", (e) => e.stopPropagation());
   els.menuExport.addEventListener("click", () => {
@@ -1299,27 +1717,41 @@ function bindUi() {
       renderTools();
     });
   });
-  els.undo.addEventListener("click", () => send({ type: "undo" }));
-  els.redo.addEventListener("click", () => send({ type: "redo" }));
+  els.undo.addEventListener("click", () => {
+    if (state.canUndo) send({ type: "undo" });
+  });
+  els.redo.addEventListener("click", () => {
+    if (state.canRedo) send({ type: "redo" });
+  });
+  bindTips();
   els.fit.addEventListener("click", fitView);
   els.extend.addEventListener("click", () => send({ type: "extend" }));
-  els.chatToggle.addEventListener("click", () => {
-    els.chat.classList.toggle("chat-closed");
-    els.chat.classList.toggle("chat-open");
-    els.chatToggle.textContent = els.chat.classList.contains("chat-closed") ? "›" : "‹";
-    els.chatToggle.title = els.chat.classList.contains("chat-closed") ? "打开聊天" : "折叠聊天";
-    fitView();
+  els.scrollNav.addEventListener("click", (e) => {
+    const r = els.segTrack.getBoundingClientRect();
+    jumpTo(Math.max(0, Math.min(1, (e.clientX - r.left) / r.width)));
   });
+  els.chatToggle.addEventListener("click", () => setChatOpen(false));
+  els.chatRail.addEventListener("click", () => {
+    setChatOpen(true);
+    els.chatInput.focus();
+  });
+  els.newMsg.addEventListener("click", () => renderChat(true));
+  els.log.addEventListener("scroll", () => {
+    if (nearBottom()) els.newMsg.hidden = true;
+  });
+  els.chatInput.addEventListener("input", autosizeChatInput);
   els.chatInput.addEventListener("keydown", (e) => {
-    if (e.key === "Enter" && !e.shiftKey) {
+    if (e.key === "Enter" && !e.shiftKey && !isImeEnter(e)) {
       e.preventDefault();
       const text = els.chatInput.value.trim();
       if (!text) return;
       send({ type: "chat", text: text.slice(0, 200) });
       els.chatInput.value = "";
+      autosizeChatInput();
     }
   });
   els.textBox.addEventListener("keydown", (e) => {
+    if (isImeEnter(e)) return;
     if (e.key === "Enter") {
       e.preventDefault();
       commitText();
@@ -1345,6 +1777,7 @@ function bindUi() {
 function boot() {
   state.clientId = getClientId();
   els.nick.value = loadName();
+  state.custom = loadRecent()[0] || null;
   const code = pathCode();
   if (code && loadName()) {
     enterWall(code);
@@ -1352,7 +1785,7 @@ function boot() {
     // 第一次通过链接进来：先填昵称，再推门
     showLobby();
     els.codeInput.value = code;
-    showLobbyError("先告诉大家怎么称呼你，再推门");
+    showLobbyError("先告诉大家怎么称呼你，再推门", "hint");
     els.nick.focus();
   } else {
     els.wall.hidden = true;

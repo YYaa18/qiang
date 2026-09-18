@@ -12,7 +12,6 @@ const PUBLIC_DIR = path.join(__dirname, "public");
 
 const CODE_CHARS = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
 const PALETTE = ["#C43C3C", "#3B5BDB", "#2F9E44", "#E67700"];
-const NEUTRALS = ["#1A1A1A", "#FFFFFF", "#868E96"];
 const PEN_WIDTHS = [3, 8, 18];
 const ERASER_WIDTHS = [8, 18, 36];
 const MAX_USERS = 4;
@@ -174,14 +173,6 @@ function asPoint(room, p, margin = 0) {
   return null;
 }
 
-function allowedColor(user, color) {
-  const c = String(color || "").toUpperCase();
-  const ok = new Set(
-    [user.color, ...NEUTRALS].map((x) => x.toUpperCase())
-  );
-  return ok.has(c) ? c.replace(/^#/, "#") : null;
-}
-
 function normalizeHex(color) {
   const c = String(color || "").trim();
   if (/^#[0-9A-Fa-f]{6}$/.test(c)) return c.toUpperCase();
@@ -208,6 +199,7 @@ function publicUsers(room) {
     id: u.id,
     name: u.name,
     color: u.color,
+    host: u.id === room.hostId,
     online: !!(u.ws && u.ws.readyState === 1),
   }));
 }
@@ -521,7 +513,7 @@ function handleStrokeStart(ws, msg) {
   const color =
     strokeType === "eraser"
       ? "#000000"
-      : allowedColor(user, normalizeHex(msg.color) || msg.color);
+      : normalizeHex(msg.color);
   if (strokeType === "pen" && !color) return;
   const width = Number(msg.width);
   const widths = strokeType === "eraser" ? ERASER_WIDTHS : PEN_WIDTHS;
@@ -593,7 +585,8 @@ function handleTextPlace(ws, msg) {
     return;
   }
   if (!validStrokeId(msg.id)) return;
-  const color = allowedColor(user, normalizeHex(msg.color) || msg.color);
+  // 画笔色任选；身份色（光标、名字）仍按进房顺序分配
+  const color = normalizeHex(msg.color);
   if (!color) return;
   const p = asPoint(room, { x: msg.x, y: msg.y });
   if (!p) return;
