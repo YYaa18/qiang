@@ -139,6 +139,9 @@ function startServer(port, dataDir) {
       ...process.env,
       PORT: String(port),
       DATA_DIR: dataDir,
+      // 冻结阈值调小，测试里画几十笔就能触发
+      QIANG_LIVE_KEEP: "20",
+      QIANG_BAKE_BATCH: "20",
     },
     stdio: ["ignore", "pipe", "pipe"],
   });
@@ -160,6 +163,39 @@ async function stopServer(proc) {
     proc.kill("SIGKILL");
     await proc.exited;
   }
+}
+
+// 1×1 透明 PNG：服务端只校验 PNG 文件头
+const TINY_PNG = Buffer.from(
+  "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==",
+  "base64"
+);
+
+// 扮演烘焙的客户端：收到 bake 任务就上传一张图，直到收到 baked
+async function serveBakes(c, port, code) {
+  const tasks = [];
+  for (;;) {
+    const m = await c.wait((x) => x.type === "bake" || x.type === "baked", 6000);
+    if (m.type === "baked") return { baked: m, tasks };
+    tasks.push(m);
+    const r = await fetch(`http://127.0.0.1:${port}/api/rooms/${code}/seg/${m.seg}?job=${m.job}`, {
+      method: "POST",
+      body: TINY_PNG,
+    });
+    assert(r.status === 204, "upload accepted, got " + r.status);
+  }
+}
+
+function drawStrokes(c, color, n, x) {
+  const ids = [];
+  for (let i = 0; i < n; i++) {
+    const id = uuid();
+    ids.push(id);
+    c.send({ type: "stroke_start", id, strokeType: "pen", color, width: 8, x: x + i, y: 100 + i });
+    c.send({ type: "stroke_point", id, points: [{ x: x + i + 30, y: 120 + i }] });
+    c.send({ type: "stroke_end", id });
+  }
+  return ids;
 }
 
 async function test(name, fn) {
@@ -318,6 +354,12 @@ async function main() {
       assert(p0.x === 1590, "start inside");
       assert(p1.x === 1620, "small overshoot kept, got " + p1.x);
       assert(p2.x === 1640 && p2.y === -40, "far point clamped to margin, got " + JSON.stringify(p2));
+      // 坐标只保留 1 位小数
+      const r = uuid();
+      a.send({ type: "stroke_start", id: r, strokeType: "pen", color: snap.you.color, width: 8, x: 100.456, y: 200.444 });
+      a.send({ type: "stroke_end", id: r });
+      const re = await a.wait((m) => m.type === "stroke_end" && m.id === r);
+      assert(re.stroke.points[0].x === 100.5 && re.stroke.points[0].y === 200.4, "rounded to 0.1, got " + JSON.stringify(re.stroke.points[0]));
     });
 
     await test("can only undo own strokes", async () => {
@@ -530,19 +572,73 @@ async function main() {
       const ext3 = await b.wait((m) => m.type === "extend" && m.segments === 3);
       assert(ext3.segments === 3, "host can extend while locked");
 
-      // 上限 20 段
-      for (let i = 3; i < 20; i++) {
+      // 不再封顶在 20 段
+      for (let i = 3; i < 25; i++) {
         a.send({ type: "extend" });
         await a.wait((m) => m.type === "extend" && m.segments === i + 1);
       }
-      a.send({ type: "extend" });
-      const maxErr = await a.wait("error");
-      assert(maxErr.code === "max_length", "stops at 20 segments");
 
       // 新进来的人拿到的快照里有段数
       const c = track(await join(port, { code, name: "丙", clientId: uuid() }));
       const csnap = await c.wait("snapshot");
-      assert(csnap.segments === 20, "snapshot carries segments");
+      assert(csnap.segments === 25, "snapshot carries segments");
+    });
+
+    await test("old strokes are baked into segment images", async () => {
+      const hostId = uuid();
+      const code = await createRoom(port, hostId);
+      const a = track(await join(port, { code, name: "甲", clientId: hostId }));
+      const snap = await a.wait("snapshot");
+      assert(snap.frozenUpTo === 0 && Object.keys(snap.segVersions).length === 0, "nothing frozen yet");
+      drawStrokes(a, snap.you.color, 45, 200);
+      const { baked, tasks } = await serveBakes(a, port, code);
+      assert(tasks.length === 1 && tasks[0].seg === 0 && tasks[0].mode === "delta", "one delta task for segment 0");
+      assert(tasks[0].baseVersion === 0, "first bake has no base image");
+      assert(tasks[0].strokes.length === 21, "freezes all but the newest 20, got " + tasks[0].strokes.length);
+      assert(baked.versions["0"] === 1 && baked.upTo === 21, "baked v1 up to seq 21, got " + JSON.stringify(baked));
+
+      const img = await fetch(`http://127.0.0.1:${port}/api/rooms/${code}/seg/0.png?v=1`);
+      assert(img.status === 200 && img.headers.get("content-type") === "image/png", "segment image served");
+      const stale = await fetch(`http://127.0.0.1:${port}/api/rooms/${code}/seg/0.png?v=9`);
+      assert(stale.status === 404, "unknown version is 404");
+
+      const b = track(await join(port, { code, name: "乙", clientId: uuid() }));
+      const bsnap = await b.wait("snapshot");
+      assert(bsnap.frozenUpTo === 21 && bsnap.segVersions["0"] === 1, "snapshot carries frozen state");
+      assert(bsnap.strokes.every((st) => st.seq > 21), "snapshot only carries live strokes");
+      assert(bsnap.strokes.length === 24, "live tail only, got " + bsnap.strokes.length);
+
+      const archive = fs.readFileSync(path.join(dataDir, code, "archive.jsonl"), "utf8").trim().split("\n");
+      assert(archive.length === 21, "vector archive kept on disk");
+      const meta = JSON.parse(fs.readFileSync(path.join(dataDir, `${code}.json`), "utf8"));
+      assert(meta.frozenUpTo === 21 && meta.strokes.length === 24, "meta file stays small");
+    });
+
+    await test("undoing a frozen stroke re-bakes its segment", async () => {
+      const hostId = uuid();
+      const code = await createRoom(port, hostId);
+      const a = track(await join(port, { code, name: "甲", clientId: hostId }));
+      const asnap = await a.wait("snapshot");
+      const b = track(await join(port, { code, name: "乙", clientId: uuid() }));
+      const bsnap = await b.wait("snapshot");
+      const mine = drawStrokes(a, asnap.you.color, 5, 300);
+      await a.wait((m) => m.type === "stroke_end" && m.id === mine[4]);
+      drawStrokes(b, bsnap.you.color, 36, 900);
+      await serveBakes(a, port, code);
+
+      // 甲的 5 笔都已冻结，但仍能撤销：服务端要求整段重画，且不含被撤销的那一笔
+      a.send({ type: "undo" });
+      const undo = await b.wait("undo");
+      assert(undo.id === mine[4], "undo targets a frozen stroke");
+      const full = await serveBakes(a, port, code);
+      assert(full.tasks.length === 1 && full.tasks[0].mode === "full", "full re-bake requested");
+      const ids = full.tasks[0].strokes.map((st) => st.id);
+      assert(!ids.includes(mine[4]) && ids.includes(mine[3]), "undone stroke left out of the re-bake");
+      assert(full.baked.versions["0"] === 2, "segment image bumped to v2");
+
+      a.send({ type: "redo" });
+      const again = await serveBakes(a, port, code);
+      assert(again.tasks[0].strokes.some((st) => st.id === mine[4]), "redo puts it back");
     });
 
     await test("strokes persist across server restart", async () => {

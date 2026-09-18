@@ -3,7 +3,8 @@
 // 墙是横向卷轴：若干段横向拼接，每段 SEG_W×CANVAS_H，坐标全局连续
 const SEG_W = 1600;
 const CANVAS_H = 1000;
-const MAX_SEGMENTS = 20;
+const MAX_SEGMENTS = 500; // 与服务端一致：只是防滥用的保险值
+const BAKE_SCALE = 2; // 墨迹图按 2 倍分辨率烘焙，Retina 上也清楚
 const PAD = 24; // 视图四周留白（屏幕像素）
 const EXTEND_GAP = 40; // 纸右缘到「接一段」按钮的距离（画布单位）
 const EXTEND_W = 140;
@@ -113,7 +114,9 @@ const state = {
   color: null,
   scale: 1,
   segments: 1,
-  tiles: [],
+  tiles: new Map(), // 段号 → 已建出画布的段（只有屏幕附近几段）
+  frozenUpTo: 0, // seq ≤ 这个值的笔已烘焙进各段墨迹图
+  segVersions: {}, // 段号 → 墨迹图版本
   panX: 0,
   panY: 0,
   space: false,
@@ -212,7 +215,7 @@ function tileTransform(ctx, i) {
   ctx.setTransform(r, 0, 0, r, -i * SEG_W * r, 0);
 }
 
-function makeTileCanvas(i) {
+function makeInkCanvas(i) {
   const c = document.createElement("canvas");
   c.width = Math.round(SEG_W * dpr());
   c.height = Math.round(CANVAS_H * dpr());
@@ -220,41 +223,17 @@ function makeTileCanvas(i) {
   return c;
 }
 
-function resetTiles() {
-  els.tiles.innerHTML = "";
-  state.tiles = [];
-}
-
-// 每段一组 canvas（纸 / 墨 / 正在画的笔），避开单张 canvas 的尺寸上限
-function setupTiles() {
-  while (state.tiles.length > state.segments) state.tiles.pop().root.remove();
-  for (let i = state.tiles.length; i < state.segments; i++) {
-    const root = document.createElement("div");
-    root.className = "tile";
-    root.style.left = `${i * SEG_W}px`;
-    const tile = {
-      i,
-      root,
-      paper: makeTileCanvas(i),
-      ink: makeTileCanvas(i),
-      live: makeTileCanvas(i),
-      liveUsed: false,
-    };
-    root.append(tile.paper, tile.ink, tile.live);
-    els.tiles.appendChild(root);
-    state.tiles.push(tile);
-    drawPaper(tile);
-  }
-  els.wrap.style.width = `${wallW()}px`;
-  updateExtendUi();
-}
-
-function drawPaper(tile) {
-  const ctx = tile.paper.getContext("2d");
-  const x0 = tile.i * SEG_W;
+// 纸纹理全墙共用一张 1x 的图，作为每段的 CSS 背景；导出时也用它
+let paperCanvas = null;
+function makePaper() {
+  if (paperCanvas) return;
+  const c = document.createElement("canvas");
+  c.width = SEG_W;
+  c.height = CANVAS_H;
+  const ctx = c.getContext("2d");
   ctx.fillStyle = "#F3EDE2";
-  ctx.fillRect(x0, 0, SEG_W, CANVAS_H);
-  const img = ctx.getImageData(0, 0, tile.paper.width, tile.paper.height);
+  ctx.fillRect(0, 0, SEG_W, CANVAS_H);
+  const img = ctx.getImageData(0, 0, SEG_W, CANVAS_H);
   const d = img.data;
   for (let i = 0; i < d.length; i += 4) {
     const n = (Math.random() - 0.5) * 14;
@@ -267,21 +246,66 @@ function drawPaper(tile) {
   ctx.lineWidth = 1;
   for (let y = 40; y < CANVAS_H; y += 47) {
     ctx.beginPath();
-    ctx.moveTo(x0, y);
-    ctx.lineTo(x0 + SEG_W, y);
+    ctx.moveTo(0, y);
+    ctx.lineTo(SEG_W, y);
     ctx.stroke();
   }
-  if (tile.i > 0) {
-    // 段与段的接缝，像卷轴的粘接处
-    ctx.save();
-    ctx.strokeStyle = "rgba(80,60,40,0.16)";
-    ctx.setLineDash([6, 10]);
-    ctx.beginPath();
-    ctx.moveTo(x0 + 0.5, 0);
-    ctx.lineTo(x0 + 0.5, CANVAS_H);
-    ctx.stroke();
-    ctx.restore();
+  paperCanvas = c;
+  c.toBlob((blob) => {
+    if (blob) document.documentElement.style.setProperty("--paper-img", `url(${URL.createObjectURL(blob)})`);
+  });
+}
+
+function resetTiles() {
+  els.tiles.innerHTML = "";
+  state.tiles = new Map();
+}
+
+// 段数变化时调用：更新纸宽，再按视野补建 / 回收画布
+function setupTiles() {
+  makePaper();
+  for (const [i, t] of state.tiles) {
+    if (i >= state.segments) {
+      t.root.remove();
+      state.tiles.delete(i);
+    }
   }
+  els.wrap.style.width = `${wallW()}px`;
+  updateExtendUi();
+  syncTiles();
+}
+
+function visibleRange() {
+  const deskW = els.desk.clientWidth || window.innerWidth;
+  const x0 = -state.panX / state.scale;
+  const x1 = (deskW - state.panX) / state.scale;
+  return [Math.floor(x0 / SEG_W), Math.floor(x1 / SEG_W)];
+}
+
+// 画布只给屏幕附近的几段：看得见的 ±1 段建出来，±2 段以外释放（Retina 上每段墨层约 26MB）
+function syncTiles() {
+  const n = state.segments;
+  const [a, z] = visibleRange();
+  for (const [i, t] of state.tiles) {
+    if (i < a - 2 || i > z + 2 || i >= n) {
+      t.root.remove();
+      state.tiles.delete(i);
+    }
+  }
+  const fresh = [];
+  for (let i = Math.max(0, a - 1); i <= Math.min(n - 1, z + 1); i++) {
+    if (state.tiles.has(i)) continue;
+    const root = document.createElement("div");
+    root.className = "tile" + (i > 0 ? " seam" : "");
+    root.style.left = `${i * SEG_W}px`;
+    const tile = { i, root, ink: makeInkCanvas(i), live: null, liveUsed: false, base: null, baseV: 0, baseUpTo: 0, loadingV: 0 };
+    root.appendChild(tile.ink);
+    els.tiles.appendChild(root);
+    state.tiles.set(i, tile);
+    ensureBase(tile);
+    fresh.push(i);
+  }
+  if (fresh.length) rebuildInk(fresh);
 }
 
 const measureCtx = document.createElement("canvas").getContext("2d");
@@ -365,26 +389,36 @@ function drawStroke(ctx, s) {
   ctx.restore();
 }
 
-// 重建墨层：which 为段号数组，不传则重建全部段。每段按 seq 从小到大重画落在该段的笔
+function sortedStrokes() {
+  return state.strokes.filter((s) => !s.hidden).sort((a, b) => a.seq - b.seq);
+}
+
+// 画出第 i 段：先铺墨迹图（已冻结的笔），再按 seq 叠上之后的矢量笔（ctx 已平移到该段）
+function paintSegment(ctx, i, list, base = null, baseUpTo = 0) {
+  const lo = i * SEG_W;
+  const hi = lo + SEG_W;
+  if (base) ctx.drawImage(base, lo, 0, SEG_W, CANVAS_H);
+  for (const s of list) {
+    if (base && s.seq <= baseUpTo) continue;
+    const b = cachedBox(s);
+    if (b.x1 < lo || b.x0 > hi) continue;
+    drawStroke(ctx, s);
+  }
+}
+
+// 重建墨层：which 为段号数组，不传则重建所有已建出的段
 function rebuildInk(which) {
-  const idxs = which ? [...new Set(which)] : state.tiles.map((t) => t.i);
+  const idxs = (which ? [...new Set(which)] : [...state.tiles.keys()]).filter((i) => state.tiles.has(i));
   if (!idxs.length) return;
-  const list = state.strokes.filter((s) => !s.hidden).sort((a, b) => a.seq - b.seq);
+  const list = sortedStrokes();
   for (const i of idxs) {
-    const tile = state.tiles[i];
-    if (!tile) continue;
+    const tile = state.tiles.get(i);
     const off = document.createElement("canvas");
     off.width = tile.ink.width;
     off.height = tile.ink.height;
     const octx = off.getContext("2d");
     tileTransform(octx, i);
-    const lo = i * SEG_W;
-    const hi = lo + SEG_W;
-    for (const s of list) {
-      const b = cachedBox(s);
-      if (b.x1 < lo || b.x0 > hi) continue;
-      drawStroke(octx, s);
-    }
+    paintSegment(octx, i, list, tile.base, tile.baseUpTo);
     const ctx = tile.ink.getContext("2d");
     ctx.save();
     ctx.setTransform(1, 0, 0, 1, 0, 0);
@@ -396,15 +430,87 @@ function rebuildInk(which) {
   if (state.live.size || state.current) redrawLive();
 }
 
+function segImageUrl(seg, v) {
+  return `/api/rooms/${state.code}/seg/${seg}.png?v=${v}`;
+}
+
+async function loadSegImage(seg, v) {
+  const img = new Image();
+  img.src = segImageUrl(seg, v);
+  await img.decode();
+  return img;
+}
+
+// 让这一段用上最新的墨迹图；图是异步加载的，加载完再重画这一段
+function ensureBase(tile) {
+  const v = state.segVersions[tile.i] || 0;
+  if (v === tile.baseV || v === tile.loadingV) return;
+  if (!v) {
+    tile.base = null;
+    tile.baseV = 0;
+    tile.baseUpTo = 0;
+    return;
+  }
+  tile.loadingV = v;
+  const code = state.code;
+  const upTo = state.frozenUpTo;
+  loadSegImage(tile.i, v)
+    .then((img) => {
+      if (state.code !== code || state.tiles.get(tile.i) !== tile || state.segVersions[tile.i] !== v) return;
+      tile.base = img;
+      tile.baseV = v;
+      tile.baseUpTo = upTo;
+      tile.loadingV = 0;
+      rebuildInk([tile.i]);
+      pruneFrozen();
+    })
+    .catch(() => {
+      tile.loadingV = 0;
+    });
+}
+
+// 眼前各段的新墨迹图都到位后，再丢掉已冻结的矢量笔，避免画面闪一下
+function pruneFrozen() {
+  for (const t of state.tiles.values()) if (t.loadingV) return;
+  state.strokes = state.strokes.filter((s) => s.seq > state.frozenUpTo);
+}
+
+// 服务端请本机帮忙烘焙：按同一套代码画好这一段的墨迹图并上传。一次一个，排队做
+let bakeQueue = Promise.resolve();
+function onBakeTask(task) {
+  bakeQueue = bakeQueue.then(() => bakeSegment(task)).catch((err) => console.warn("bake failed", err));
+}
+
+async function bakeSegment(task) {
+  const c = document.createElement("canvas");
+  c.width = SEG_W * BAKE_SCALE;
+  c.height = CANVAS_H * BAKE_SCALE;
+  const ctx = c.getContext("2d");
+  ctx.setTransform(BAKE_SCALE, 0, 0, BAKE_SCALE, -task.seg * SEG_W * BAKE_SCALE, 0);
+  if (task.mode === "delta" && task.baseVersion) {
+    const base = await loadSegImage(task.seg, task.baseVersion);
+    ctx.drawImage(base, task.seg * SEG_W, 0, SEG_W, CANVAS_H);
+  }
+  for (const s of task.strokes.sort((a, b) => a.seq - b.seq)) drawStroke(ctx, s);
+  const blob = await new Promise((resolve) => c.toBlob(resolve, "image/png"));
+  if (!blob) throw new Error("toBlob failed");
+  await fetch(`/api/rooms/${state.code}/seg/${task.seg}?job=${task.job}`, { method: "POST", body: blob });
+}
+
 function redrawLive() {
   const lives = [...state.live.values()].sort((a, b) => a.seq - b.seq);
   if (state.current && !state.live.has(state.current.id)) lives.push(state.current);
   const boxes = lives.map((s) => [s, strokeBox(s)]);
-  for (const tile of state.tiles) {
+  for (const tile of state.tiles.values()) {
     const lo = tile.i * SEG_W;
     const hi = lo + SEG_W;
     const here = boxes.filter(([, b]) => b.x1 >= lo && b.x0 <= hi).map(([s]) => s);
     if (!here.length && !tile.liveUsed) continue;
+    // 活动层用到时才建
+    if (!tile.live) {
+      tile.live = makeInkCanvas(tile.i);
+      tile.root.appendChild(tile.live);
+    }
     const ctx = tile.live.getContext("2d");
     const erasing = here.some((s) => s.type === "eraser");
     ctx.save();
@@ -448,7 +554,9 @@ function scaleLimits() {
   const r = els.desk.getBoundingClientRect();
   const fit = heightFitScale();
   const whole = (r.width - PAD * 2) / contentW();
-  return { min: Math.max(0.05, Math.min(fit, whole)), max: Math.max(2, fit) };
+  // 最多缩到同时看见约 3 段：再远就要同时建很多段画布，内存吃不消
+  const three = r.width / (3 * SEG_W);
+  return { min: Math.max(0.05, Math.min(fit, Math.max(whole, three))), max: Math.max(2, fit) };
 }
 
 function clampPan() {
@@ -466,6 +574,7 @@ function applyView() {
   state.scale = Math.max(min, Math.min(max, state.scale));
   clampPan();
   els.wrap.style.transform = `translate(${state.panX}px, ${state.panY}px) scale(${state.scale})`;
+  syncTiles();
   updateNav();
 }
 
@@ -692,6 +801,9 @@ function applySnapshot(snap) {
     state.color = state.you.color;
   }
   els.roomCode.textContent = snap.code;
+  state.frozenUpTo = Number(snap.frozenUpTo) || 0;
+  state.segVersions = snap.segVersions || {};
+  for (const t of state.tiles.values()) ensureBase(t);
   state.segments = Math.min(MAX_SEGMENTS, Math.max(1, Number(snap.segments) || 1));
   setupTiles();
   rebuildInk();
@@ -1231,7 +1343,19 @@ function onMessage(msg) {
     case "clear_cancel":
       stopClearUi();
       break;
+    case "bake":
+      onBakeTask(msg);
+      break;
+    case "baked":
+      state.frozenUpTo = msg.upTo;
+      Object.assign(state.segVersions, msg.versions || {});
+      for (const t of state.tiles.values()) ensureBase(t);
+      pruneFrozen();
+      break;
     case "clear_done":
+      state.frozenUpTo = 0;
+      state.segVersions = {};
+      for (const t of state.tiles.values()) ensureBase(t);
       state.strokes = [];
       state.live.clear();
       state.current = null;
@@ -1478,14 +1602,39 @@ function onWheel(e) {
   applyView();
 }
 
+// 导出整条卷轴；超过浏览器单张图宽度上限（约 32000px）时按比例缩小
+const EXPORT_MAX_W = 32000;
+
 async function exportPng() {
+  makePaper();
+  const k = Math.min(1, EXPORT_MAX_W / wallW());
+  const segW = SEG_W * k;
+  const H = Math.round(CANVAS_H * k);
   const out = document.createElement("canvas");
-  out.width = wallW();
-  out.height = CANVAS_H;
+  out.width = Math.round(wallW() * k);
+  out.height = H;
   const ctx = out.getContext("2d");
-  for (const t of state.tiles) {
-    ctx.drawImage(t.paper, t.i * SEG_W, 0, SEG_W, CANVAS_H);
-    ctx.drawImage(t.ink, t.i * SEG_W, 0, SEG_W, CANVAS_H);
+  const list = sortedStrokes();
+  const ink = document.createElement("canvas");
+  ink.width = Math.ceil(segW);
+  ink.height = H;
+  const ictx = ink.getContext("2d");
+  for (let i = 0; i < state.segments; i++) {
+    ctx.drawImage(paperCanvas, i * segW, 0, segW, H);
+    ictx.setTransform(1, 0, 0, 1, 0, 0);
+    ictx.clearRect(0, 0, ink.width, ink.height);
+    ictx.setTransform(k, 0, 0, k, -i * segW, 0);
+    const v = state.segVersions[i] || 0;
+    let base = null;
+    if (v) {
+      try {
+        base = await loadSegImage(i, v); // 逐段加载、用完即丢，不在内存里攒着
+      } catch {
+        toast("有一段墨迹图没加载出来");
+      }
+    }
+    paintSegment(ictx, i, list, base, state.frozenUpTo);
+    ctx.drawImage(ink, i * segW, 0);
   }
   const a = document.createElement("a");
   const t = new Date();

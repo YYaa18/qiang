@@ -1,0 +1,7 @@
+# /etc/caddy/Caddyfile
+# 把 wall.example.com 换成你的域名（先把域名的 A 记录指向这台 VPS）。
+# Caddy 会自动申请和续期 HTTPS 证书，WebSocket 也会自动转发。
+wall.example.com {
+	encode zstd gzip
+	reverse_proxy 127.0.0.1:3000
+}

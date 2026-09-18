@@ -389,6 +389,7 @@ button:disabled { opacity: 0.4; cursor: default; }
   width: 1600px; /* 由 JS 按段数设置 */
   height: 1000px;
   transform-origin: 0 0;
+  background: var(--paper);
   box-shadow: 0 14px 40px rgba(40, 30, 20, 0.22);
 }
 #paper-wrap.gliding { transition: transform 0.35s ease; }
@@ -397,6 +398,18 @@ button:disabled { opacity: 0.4; cursor: default; }
   top: 0;
   width: 1600px;
   height: 1000px;
+  /* 纸纹理全墙共用一张图 */
+  background: var(--paper) var(--paper-img, none) 0 0 / 1600px 1000px;
+}
+/* 段与段的接缝，像卷轴的粘接处 */
+.tile.seam::before {
+  content: "";
+  position: absolute;
+  left: 0;
+  top: 0;
+  bottom: 0;
+  border-left: 1px dashed rgba(80, 60, 40, 0.22);
+  pointer-events: none;
 }
 .tile canvas {
   position: absolute;

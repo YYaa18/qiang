@@ -7,6 +7,8 @@ const path = require("path");
 const { WebSocketServer } = require("ws");
 
 const PORT = Number(process.env.PORT) || 3000;
+// VPS 上放在 Caddy 后面时设成 127.0.0.1，不把端口直接暴露到公网
+const HOST = process.env.HOST || "0.0.0.0";
 const DATA_DIR = process.env.DATA_DIR || path.join(__dirname, "data", "rooms");
 const PUBLIC_DIR = path.join(__dirname, "public");
 
@@ -22,8 +24,13 @@ const NAME_MAX = 16;
 // 墙是横向卷轴：由若干段拼成，每段 SEG_W×CANVAS_H，坐标全局连续
 const SEG_W = 1600;
 const CANVAS_H = 1000;
-// 20 段 = 32000 像素，恰好在浏览器单张 canvas 宽度上限（32767）以内，导出 PNG 不会失败
-const MAX_SEGMENTS = 20;
+// 卷轴可以一直接长；这里只是防滥用的保险值（导出时超长会按比例缩小）
+const MAX_SEGMENTS = 500;
+// 冻结：只保留最新的 LIVE_KEEP 笔为矢量；多出 BAKE_BATCH 笔时，把更早的笔烘焙进每段的墨迹图
+const LIVE_KEEP = Number(process.env.QIANG_LIVE_KEEP) || 150;
+const BAKE_BATCH = Number(process.env.QIANG_BAKE_BATCH) || 200;
+const BAKE_TIMEOUT_MS = 30_000;
+const BAKE_MAX_BYTES = 30 * 1024 * 1024;
 // 笔画点允许超出纸面的余量：canvas 自己会裁掉，避免拖出纸边时贴边画线
 const STROKE_MARGIN = 40;
 const UUID_RE =
@@ -61,6 +68,17 @@ class Room {
     this.chat = [];
     this.nextSeq = 1;
     this.segments = 1;
+    // 冻结状态：seq ≤ frozenUpTo 的笔都已画进各段的墨迹图，矢量存档在磁盘上
+    this.frozenUpTo = 0;
+    /** @type {Record<string, number>} 段号 → 墨迹图版本 */
+    this.segVersions = {};
+    /** @type {Set<string>} 冻结后又被撤销的笔 */
+    this.hiddenFrozen = new Set();
+    /** @type {Record<string, number[]>} 仍在某人撤销/重做栈里的冻结笔 → 所在段 */
+    this.frozenIndex = {};
+    /** @type {Set<number>} 需要从存档整段重画的段 */
+    this.dirtyFull = new Set();
+    this.job = null;
     /** @type {Record<string, string>} */
     this.colorByUser = {};
     /** @type {Record<string, { undo: string[], redo: string[] }>} */
@@ -161,9 +179,10 @@ function clipPoint(room, x, y, margin = 0) {
   const nx = Number(x);
   const ny = Number(y);
   if (!Number.isFinite(nx) || !Number.isFinite(ny)) return null;
+  // 坐标保留 1 位小数：肉眼无差别，存储和传输体积减半
   return {
-    x: Math.max(-margin, Math.min(wallWidth(room) + margin, nx)),
-    y: Math.max(-margin, Math.min(CANVAS_H + margin, ny)),
+    x: Math.round(Math.max(-margin, Math.min(wallWidth(room) + margin, nx)) * 10) / 10,
+    y: Math.round(Math.max(-margin, Math.min(CANVAS_H + margin, ny)) * 10) / 10,
   };
 }
 
@@ -242,6 +261,8 @@ function snapshotMsg(room, user) {
     chat: room.chat,
     locked: room.locked,
     segments: room.segments,
+    frozenUpTo: room.frozenUpTo,
+    segVersions: room.segVersions,
     clearDeadline: room.clearDeadline,
     you: youInfo(room, user),
   };
@@ -272,6 +293,11 @@ function serialize(room) {
     chat: room.chat,
     nextSeq: room.nextSeq,
     segments: room.segments,
+    frozenUpTo: room.frozenUpTo,
+    segVersions: room.segVersions,
+    hiddenFrozen: [...room.hiddenFrozen],
+    frozenIndex: room.frozenIndex,
+    dirtyFull: [...room.dirtyFull],
     colorByUser: room.colorByUser,
     stacks: room.stacks,
     clearDeadline: room.clearDeadline,
@@ -355,6 +381,11 @@ function loadRooms() {
       room.colorByUser = raw.colorByUser || {};
       room.stacks = raw.stacks || {};
       room.clearDeadline = raw.clearDeadline || null;
+      room.frozenUpTo = Number(raw.frozenUpTo) || 0;
+      room.segVersions = raw.segVersions || {};
+      room.hiddenFrozen = new Set(raw.hiddenFrozen || []);
+      room.frozenIndex = raw.frozenIndex || {};
+      room.dirtyFull = new Set(raw.dirtyFull || []);
       rooms.set(room.code, room);
       restoreClearTimer(room);
     } catch (err) {
@@ -397,6 +428,7 @@ function commitStroke(room, id) {
   if (st.undo.length > UNDO_MAX) st.undo.shift();
   st.redo = [];
   broadcast(room, { type: "stroke_end", id: s.id, userId: s.userId, stroke: s });
+  maybeBake(room);
   const user = room.users.get(s.userId);
   if (user) {
     send(user.ws, {
@@ -407,6 +439,241 @@ function commitStroke(room, id) {
   }
   scheduleSave(room);
   return s;
+}
+
+// ───────────── 冻结：旧笔画烘焙成每段一张墨迹图 ─────────────
+//
+// 一笔足够旧（不在最新 LIVE_KEEP 笔里）就可以冻结：由一个在线客户端用同一套绘制代码
+// 把它画进所在段的墨迹图（透明 PNG）并上传。冻结的是一整段 seq 前缀，所以叠放顺序不变。
+// 矢量存档永久留在磁盘上：撤销/重做一笔已冻结的笔时，从存档把受影响的段整段重画。
+
+function roomDir(room) {
+  return path.join(DATA_DIR, room.code);
+}
+
+function archiveFile(room) {
+  return path.join(roomDir(room), "archive.jsonl");
+}
+
+function segFile(room, seg, version) {
+  return path.join(roomDir(room), `seg-${seg}-${version}.png`);
+}
+
+// 笔画横跨哪几段。服务端量不了字宽，文字按每字 22px 从宽估计——多算一段没关系
+function segsOf(room, s) {
+  let x0;
+  let x1;
+  if (s.type === "text") {
+    x0 = s.x;
+    x1 = s.x + [...(s.text || "")].length * 22;
+  } else {
+    x0 = Infinity;
+    x1 = -Infinity;
+    for (const p of s.points || []) {
+      if (p.x < x0) x0 = p.x;
+      if (p.x > x1) x1 = p.x;
+    }
+    const h = (s.width || 0) / 2 + 1;
+    x0 -= h;
+    x1 += h;
+  }
+  const out = [];
+  const a = Math.max(0, Math.floor(x0 / SEG_W));
+  const z = Math.min(room.segments - 1, Math.floor(x1 / SEG_W));
+  for (let i = a; i <= z; i++) out.push(i);
+  return out;
+}
+
+function stackedIds(room) {
+  const ids = new Set();
+  for (const st of Object.values(room.stacks)) {
+    for (const id of st.undo) ids.add(id);
+    for (const id of st.redo) ids.add(id);
+  }
+  return ids;
+}
+
+// 撤销/重做一笔已冻结的笔：记下隐藏状态，所在段排队整段重画
+function setFrozenHidden(room, id, hidden) {
+  const segs = room.frozenIndex[id];
+  if (!segs) return;
+  if (hidden) room.hiddenFrozen.add(id);
+  else room.hiddenFrozen.delete(id);
+  for (const seg of segs) room.dirtyFull.add(seg);
+}
+
+// 任务进行中，参与冻结的笔被撤销/重做，或要重画的段又变了：作废重来
+function touchJob(room, id) {
+  const job = room.job;
+  if (!job) return;
+  if (job.kind === "delta" && job.ids.has(id)) abortJob(room, "stroke changed");
+  else if (job.kind === "full" && (room.frozenIndex[id] || []).some((seg) => job.tasks.has(seg))) {
+    abortJob(room, "segment changed");
+  }
+}
+
+function pickBaker(room) {
+  const online = [...room.users.values()].filter((u) => u.ws && u.ws.readyState === 1);
+  return online.find((u) => u.id === room.hostId) || online[0] || null;
+}
+
+function readArchive(room) {
+  let raw;
+  try {
+    raw = fs.readFileSync(archiveFile(room), "utf8");
+  } catch {
+    return [];
+  }
+  const out = [];
+  for (const line of raw.split("\n")) {
+    if (!line) continue;
+    try {
+      out.push(JSON.parse(line));
+    } catch {
+      /* 半行（崩溃时写到一半）直接跳过 */
+    }
+  }
+  return out;
+}
+
+function maybeBake(room) {
+  if (room.job) return;
+  const baker = pickBaker(room);
+  if (!baker) return;
+  if (room.dirtyFull.size) {
+    startFullJob(room, baker);
+    return;
+  }
+  if (room.strokes.length <= LIVE_KEEP + BAKE_BATCH) return;
+  const sorted = [...room.strokes].sort((a, b) => a.seq - b.seq);
+  let cutoff = sorted[sorted.length - LIVE_KEEP - 1].seq;
+  // 还在画的笔 seq 更小的话，冻结线不能越过它，否则它落定后会压在更新的笔上面
+  for (const o of room.open.values()) cutoff = Math.min(cutoff, o.seq - 1);
+  const frozen = sorted.filter((st) => st.seq <= cutoff);
+  if (!frozen.length) return;
+  const tasks = new Map();
+  for (const st of frozen) {
+    for (const seg of segsOf(room, st)) {
+      if (!tasks.has(seg)) tasks.set(seg, []);
+      tasks.get(seg).push(st);
+    }
+  }
+  startJob(room, baker, "delta", tasks, { cutoff, frozen, ids: new Set(frozen.map((st) => st.id)) });
+}
+
+function startFullJob(room, baker) {
+  const segs = [...room.dirtyFull];
+  room.dirtyFull.clear();
+  const tasks = new Map(segs.map((seg) => [seg, []]));
+  for (const st of readArchive(room)) {
+    if (st.seq > room.frozenUpTo || room.hiddenFrozen.has(st.id)) continue;
+    for (const seg of segsOf(room, st)) if (tasks.has(seg)) tasks.get(seg).push(st);
+  }
+  startJob(room, baker, "full", tasks, { segs });
+}
+
+function startJob(room, baker, kind, tasks, extra) {
+  const job = {
+    id: crypto.randomUUID(),
+    kind,
+    baker: baker.id,
+    tasks,
+    files: new Map(),
+    timer: setTimeout(() => abortJob(room, "timeout"), BAKE_TIMEOUT_MS),
+    ...extra,
+  };
+  room.job = job;
+  for (const [seg, strokes] of tasks) {
+    send(baker.ws, {
+      type: "bake",
+      job: job.id,
+      seg,
+      mode: kind,
+      baseVersion: kind === "delta" ? room.segVersions[seg] || 0 : 0,
+      strokes: strokes.map((st) => (st.hidden ? null : st)).filter(Boolean),
+    });
+  }
+}
+
+function abortJob(room, reason) {
+  const job = room.job;
+  if (!job) return;
+  clearTimeout(job.timer);
+  for (const file of job.files.values()) fs.rmSync(file, { force: true });
+  if (job.kind === "full") for (const seg of job.segs) room.dirtyFull.add(seg);
+  room.job = null;
+  if (reason !== "cleared") setTimeout(() => maybeBake(room), 1000).unref?.();
+}
+
+async function handleBakeUpload(req, res, room, seg, jobId) {
+  const job = room.job;
+  if (!job || job.id !== jobId || !job.tasks.has(seg) || job.files.has(seg)) {
+    res.writeHead(409);
+    res.end();
+    return;
+  }
+  const chunks = [];
+  let size = 0;
+  for await (const c of req) {
+    size += c.length;
+    if (size > BAKE_MAX_BYTES) {
+      res.writeHead(413);
+      res.end();
+      return;
+    }
+    chunks.push(c);
+  }
+  const body = Buffer.concat(chunks);
+  const PNG_SIG = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
+  if (!body.subarray(0, 8).equals(PNG_SIG)) {
+    res.writeHead(400);
+    res.end();
+    return;
+  }
+  if (room.job !== job) {
+    // 上传途中任务被作废了
+    res.writeHead(409);
+    res.end();
+    return;
+  }
+  fs.mkdirSync(roomDir(room), { recursive: true });
+  const version = (room.segVersions[seg] || 0) + 1;
+  const file = segFile(room, seg, version);
+  fs.writeFileSync(`${file}.tmp`, body);
+  fs.renameSync(`${file}.tmp`, file);
+  job.files.set(seg, file);
+  res.writeHead(204);
+  res.end();
+  if (job.files.size === job.tasks.size) commitJob(room, job);
+}
+
+function commitJob(room, job) {
+  clearTimeout(job.timer);
+  room.job = null;
+  const versions = {};
+  for (const seg of job.tasks.keys()) {
+    const old = room.segVersions[seg] || 0;
+    if (old) fs.rmSync(segFile(room, seg, old), { force: true });
+    room.segVersions[seg] = old + 1;
+    versions[seg] = old + 1;
+  }
+  if (job.kind === "delta") {
+    // 先追加存档，再改元数据：中途崩溃最多在存档里多一份重复的笔，重画时无害
+    const stacked = stackedIds(room);
+    const lines = [];
+    for (const st of job.frozen) {
+      lines.push(JSON.stringify(st));
+      if (st.hidden) room.hiddenFrozen.add(st.id);
+      if (stacked.has(st.id)) room.frozenIndex[st.id] = segsOf(room, st);
+    }
+    fs.appendFileSync(archiveFile(room), lines.join("\n") + "\n");
+    for (const id of Object.keys(room.frozenIndex)) if (!stacked.has(id)) delete room.frozenIndex[id];
+    room.strokes = room.strokes.filter((st) => !job.ids.has(st.id));
+    room.frozenUpTo = job.cutoff;
+  }
+  saveRoomNow(room);
+  broadcast(room, { type: "baked", upTo: room.frozenUpTo, versions });
+  maybeBake(room);
 }
 
 function handleJoin(ws, msg) {
@@ -470,6 +737,7 @@ function handleJoin(ws, msg) {
   pushSystem(room, `${name}来了`);
   broadcast(room, { type: "presence", users: publicUsers(room) });
   scheduleSave(room);
+  maybeBake(room);
 }
 
 function bindSocket(ws, room, user) {
@@ -489,6 +757,7 @@ function handleClose(ws) {
   }
   finishOpenStrokes(room, user.id);
   user.ws = null;
+  if (room.job && room.job.baker === user.id) abortJob(room, "baker left");
   user.timer = setTimeout(() => {
     if (room.users.get(user.id) !== user) return;
     if (user.ws) return;
@@ -611,6 +880,7 @@ function handleTextPlace(ws, msg) {
   if (st.undo.length > UNDO_MAX) st.undo.shift();
   st.redo = [];
   broadcast(room, { type: "text_place", stroke });
+  maybeBake(room);
   send(ws, {
     type: "stacks",
     canUndo: st.undo.length > 0,
@@ -632,6 +902,8 @@ function handleUndo(ws) {
   if (!id) return;
   const stroke = room.strokes.find((s) => s.id === id);
   if (stroke && stroke.userId === user.id) stroke.hidden = true;
+  else setFrozenHidden(room, id, true);
+  touchJob(room, id);
   st.redo.push(id);
   broadcast(room, {
     type: "undo",
@@ -641,6 +913,7 @@ function handleUndo(ws) {
     canRedo: true,
   });
   scheduleSave(room);
+  maybeBake(room);
 }
 
 function handleRedo(ws) {
@@ -656,6 +929,8 @@ function handleRedo(ws) {
   if (!id) return;
   const stroke = room.strokes.find((s) => s.id === id);
   if (stroke && stroke.userId === user.id) stroke.hidden = false;
+  else setFrozenHidden(room, id, false);
+  touchJob(room, id);
   st.undo.push(id);
   broadcast(room, {
     type: "redo",
@@ -665,6 +940,7 @@ function handleRedo(ws) {
     canRedo: st.redo.length > 0,
   });
   scheduleSave(room);
+  maybeBake(room);
 }
 
 function handleCursor(ws, msg) {
@@ -779,6 +1055,13 @@ function finishClear(room) {
   room.strokes = [];
   room.open.clear();
   room.stacks = {};
+  abortJob(room, "cleared");
+  room.frozenUpTo = 0;
+  room.segVersions = {};
+  room.hiddenFrozen = new Set();
+  room.frozenIndex = {};
+  room.dirtyFull = new Set();
+  fs.rmSync(roomDir(room), { recursive: true, force: true });
   broadcast(room, { type: "clear_done" });
   pushSystem(room, "墙被清空了");
   scheduleSave(room);
@@ -966,6 +1249,44 @@ async function handleHttp(req, res) {
     return;
   }
 
+  // /api/rooms/CODE/seg/N.png?v=V 取墨迹图；POST /api/rooms/CODE/seg/N?job=J 上传烘焙结果
+  const segMatch = url.pathname.match(/^\/api\/rooms\/([A-Z0-9]{4})\/seg\/(\d+)(\.png)?$/);
+  if (segMatch) {
+    const room = rooms.get(segMatch[1]);
+    const seg = Number(segMatch[2]);
+    if (!room || seg >= room.segments) {
+      res.writeHead(404);
+      res.end();
+      return;
+    }
+    if (req.method === "POST" && !segMatch[3]) {
+      await handleBakeUpload(req, res, room, seg, url.searchParams.get("job"));
+      return;
+    }
+    const version = Number(url.searchParams.get("v"));
+    if (req.method === "GET" && segMatch[3] && version && room.segVersions[seg] === version) {
+      const file = segFile(room, seg, version);
+      fs.stat(file, (err, st) => {
+        if (err) {
+          res.writeHead(404);
+          res.end();
+          return;
+        }
+        // 每个版本的图永不改变，可以放心长缓存
+        res.writeHead(200, {
+          "Content-Type": "image/png",
+          "Content-Length": st.size,
+          "Cache-Control": "public, max-age=31536000, immutable",
+        });
+        fs.createReadStream(file).pipe(res);
+      });
+      return;
+    }
+    res.writeHead(404);
+    res.end();
+    return;
+  }
+
   if (req.method !== "GET" && req.method !== "HEAD") {
     res.writeHead(405);
     res.end();
@@ -1011,7 +1332,8 @@ const server = http.createServer((req, res) => {
     res.end();
   });
 });
-const wss = new WebSocketServer({ server });
+// 只压缩大消息（进墙时的整墙快照），笔迹点这类小消息不压，省 CPU
+const wss = new WebSocketServer({ server, perMessageDeflate: { threshold: 8 * 1024 } });
 
 wss.on("connection", (ws) => {
   ws.isAlive = true;
@@ -1045,14 +1367,9 @@ const heartbeat = setInterval(() => {
 }, 15000);
 heartbeat.unref?.();
 
-const persistTick = setInterval(() => {
-  for (const room of rooms.values()) scheduleSave(room);
-}, 5000);
-persistTick.unref?.();
 
 function shutdown() {
   clearInterval(heartbeat);
-  clearInterval(persistTick);
   flushAll();
   wss.close();
   server.close(() => process.exit(0));
@@ -1062,6 +1379,6 @@ function shutdown() {
 process.on("SIGTERM", shutdown);
 process.on("SIGINT", shutdown);
 
-server.listen(PORT, () => {
-  console.log(`qiang listening on ${PORT}`);
+server.listen(PORT, HOST, () => {
+  console.log(`qiang listening on ${HOST}:${PORT}, data in ${DATA_DIR}`);
 });

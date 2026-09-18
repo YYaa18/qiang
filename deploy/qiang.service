@@ -1,0 +1,29 @@
+# /etc/systemd/system/qiang.service
+[Unit]
+Description=墙 — 四人共用涂鸦墙
+After=network.target
+
+[Service]
+Type=simple
+User=qiang
+WorkingDirectory=/opt/qiang
+Environment=NODE_ENV=production
+Environment=PORT=3000
+Environment=HOST=127.0.0.1
+Environment=DATA_DIR=/var/lib/qiang/rooms
+ExecStart=/usr/bin/node /opt/qiang/server.js
+Restart=always
+RestartSec=2
+# 收到 SIGTERM 时服务会把没写完的房间存盘再退出
+KillSignal=SIGTERM
+TimeoutStopSec=10
+
+# 基本的隔离：只能写数据目录
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/qiang
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target
