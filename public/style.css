@@ -90,14 +90,9 @@ button:disabled { opacity: 0.4; cursor: default; }
   display: flex;
   justify-content: center;
   gap: 8px;
-  margin-bottom: 14px;
+  margin-bottom: 28px;
 }
 .lobby-dots span { width: 10px; height: 10px; border-radius: 50%; }
-.tagline {
-  text-align: center;
-  color: var(--muted);
-  margin: 0 0 28px;
-}
 .or {
   display: flex;
   align-items: center;
