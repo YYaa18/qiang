@@ -806,6 +806,40 @@ async function main() {
       assert(err.code === "not_found", "a code that was never used is still not found");
     });
 
+    await test("a clear countdown survives the room leaving memory", async () => {
+      const hostId = uuid();
+      const code = await createRoom(port, hostId);
+      const a = track(await join(port, { code, name: "甲", clientId: hostId }));
+      const asnap = await a.wait("snapshot");
+      const sid = uuid();
+      a.send({
+        type: "stroke_start",
+        id: sid,
+        strokeType: "pen",
+        color: asnap.you.color,
+        width: 8,
+        x: 20,
+        y: 30,
+      });
+      a.send({ type: "stroke_end", id: sid });
+      await a.wait((m) => m.type === "stroke_end" && m.id === sid);
+      a.send({ type: "leave" });
+      await delay(400); // 等房间被请出内存
+
+      // 倒计时只存 deadline，不存 setTimeout 句柄。把它改成已经到点，
+      // 房间再读起来时必须有人把它接着走完——这正是 onRoomLoaded 钩子的活。
+      const file = path.join(dataDir, `${code}.json`);
+      const onDisk = JSON.parse(fs.readFileSync(file, "utf8"));
+      assert(onDisk.strokes.length === 1, "the stroke is on disk to begin with");
+      onDisk.clearDeadline = Date.now() - 1000;
+      fs.writeFileSync(file, JSON.stringify(onDisk));
+
+      const again = track(await join(port, { code, name: "甲", clientId: hostId }));
+      const snap = await again.wait("snapshot");
+      assert(snap.clearDeadline === null, "the overdue countdown was finished, not left hanging");
+      assert(snap.strokes.length === 0, "the wall was actually cleared");
+    });
+
     await test("many cursor moves come back as one merged message", async () => {
       const hostId = uuid();
       const code = await createRoom(port, hostId);

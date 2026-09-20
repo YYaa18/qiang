@@ -1,0 +1,213 @@
+"use strict";
+
+// 谁在这面墙上：进来、离开、被请走、改名，以及房主能做的锁定和接长。
+//
+// 身份就是客户端自己生成的 clientId，没有登录。断线有 10 秒宽限期（刷新和地铁里用得着），
+// 主动点「离开」则立刻腾出座位。
+
+const { MAX_USERS, GRACE_MS, MAX_SEGMENTS } = require("../config");
+const { send, broadcast } = require("../net");
+const { getRoom, rooms, scheduleSave, ctxOf } = require("../store");
+const { assignColor, publicUsers, snapshotMsg } = require("../room");
+const { normalizeCode, validCode, validUuid, cleanName } = require("../protocol");
+const { abortJob, retryBake } = require("../bake");
+const { finishOpenStrokes } = require("./draw");
+const { pushSystem } = require("./chat");
+
+function bindSocket(ws, room, user) {
+  ws.roomCode = room.code;
+  ws.clientId = user.id;
+}
+
+function handleJoin(ws, msg) {
+  const code = normalizeCode(msg.code);
+  const clientId = msg.clientId;
+  if (!validUuid(clientId)) {
+    send(ws, { type: "error", code: "invalid", message: "身份无效" });
+    return;
+  }
+  const room = validCode(code) ? getRoom(code) : null;
+  if (!room) {
+    send(ws, { type: "error", code: "not_found", message: "没有这面墙" });
+    return;
+  }
+  const name = cleanName(msg.name);
+  const existing = room.users.get(clientId);
+
+  if (existing) {
+    if (existing.ws && existing.ws !== ws && existing.ws.readyState === 1) {
+      existing.replaced = true;
+      send(existing.ws, { type: "replaced", message: "已在别处打开" });
+      try {
+        existing.ws.close();
+      } catch {
+        /* ignore */
+      }
+    }
+    if (existing.timer) {
+      clearTimeout(existing.timer);
+      existing.timer = null;
+    }
+    existing.ws = ws;
+    existing.name = name;
+    existing.kicked = false;
+    existing.replaced = false;
+    existing.weak = !!msg.weak; // 同一个人可能换了台机器回来
+    bindSocket(ws, room, existing);
+    send(ws, snapshotMsg(room, existing));
+    broadcast(room, { type: "presence", users: publicUsers(room) }, existing.id);
+    retryBake(room);
+    return;
+  }
+
+  if (room.users.size >= MAX_USERS) {
+    send(ws, { type: "error", code: "full", message: "墙满了" });
+    return;
+  }
+
+  const color = assignColor(room, clientId);
+  room.colorByUser[clientId] = color;
+  const user = {
+    id: clientId,
+    name,
+    color,
+    ws,
+    timer: null,
+    kicked: false,
+    replaced: false,
+    weak: !!msg.weak, // 手机／平板：尽量不让它去烘焙
+  };
+  room.users.set(clientId, user);
+  bindSocket(ws, room, user);
+  send(ws, snapshotMsg(room, user));
+  pushSystem(room, `${name}来了`);
+  broadcast(room, { type: "presence", users: publicUsers(room) });
+  scheduleSave(room);
+  retryBake(room);
+}
+
+function handleClose(ws) {
+  const room = rooms.get(ws.roomCode);
+  if (!room) return;
+  const user = room.users.get(ws.clientId);
+  if (!user) return;
+  if (user.ws !== ws) return;
+  if (user.kicked || user.replaced) {
+    user.ws = null;
+    return;
+  }
+  finishOpenStrokes(room, user.id);
+  user.ws = null;
+  if (room.job && room.job.baker === user.id) abortJob(room, "baker left");
+  user.timer = setTimeout(() => {
+    if (room.users.get(user.id) !== user) return;
+    if (user.ws) return;
+    room.users.delete(user.id);
+    pushSystem(room, `${user.name}走了`);
+    broadcast(room, { type: "presence", users: publicUsers(room) });
+    scheduleSave(room);
+  }, GRACE_MS);
+}
+
+// 主动离开：立刻释放座位并提示，不等 10 秒宽限期（宽限期是给刷新和断网用的）
+function handleLeave(ws) {
+  const ctx = ctxOf(ws);
+  if (!ctx) return;
+  const { room, user } = ctx;
+  finishOpenStrokes(room, user.id);
+  if (room.job && room.job.baker === user.id) abortJob(room, "baker left");
+  if (user.timer) clearTimeout(user.timer);
+  user.ws = null;
+  room.users.delete(user.id);
+  pushSystem(room, `${user.name}走了`);
+  broadcast(room, { type: "presence", users: publicUsers(room) });
+  scheduleSave(room);
+  try {
+    ws.close();
+  } catch {
+    /* ignore */
+  }
+}
+
+function handleKick(ws, msg) {
+  const ctx = ctxOf(ws);
+  if (!ctx) return;
+  const { room, user } = ctx;
+  if (user.id !== room.hostId) {
+    send(ws, { type: "error", code: "forbidden", message: "只有房主可以这样做" });
+    return;
+  }
+  const targetId = msg.targetId;
+  if (!targetId || targetId === user.id) return;
+  const target = room.users.get(targetId);
+  if (!target) return;
+  target.kicked = true;
+  if (target.timer) {
+    clearTimeout(target.timer);
+    target.timer = null;
+  }
+  finishOpenStrokes(room, target.id);
+  send(target.ws, { type: "kicked", message: "你被请离了这面墙" });
+  try {
+    if (target.ws) target.ws.close();
+  } catch {
+    /* ignore */
+  }
+  room.users.delete(target.id);
+  pushSystem(room, `${target.name}被请离了`);
+  broadcast(room, { type: "presence", users: publicUsers(room) });
+  broadcast(room, { type: "kick", targetId });
+  scheduleSave(room);
+}
+
+function handleRename(ws, msg) {
+  const ctx = ctxOf(ws);
+  if (!ctx) return;
+  const { room, user } = ctx;
+  user.name = cleanName(msg.name);
+  broadcast(room, { type: "presence", users: publicUsers(room) });
+  scheduleSave(room);
+}
+
+function handleLock(ws, locked) {
+  const ctx = ctxOf(ws);
+  if (!ctx) return;
+  const { room, user } = ctx;
+  if (user.id !== room.hostId) {
+    send(ws, { type: "error", code: "forbidden", message: "只有房主可以这样做" });
+    return;
+  }
+  room.locked = !!locked;
+  if (room.locked) finishOpenStrokes(room, null, true);
+  broadcast(room, { type: "lock", locked: room.locked });
+  pushSystem(room, room.locked ? "墙被锁定了" : "墙解锁了");
+  scheduleSave(room);
+}
+
+function handleExtend(ws) {
+  const ctx = ctxOf(ws);
+  if (!ctx) return;
+  const { room, user } = ctx;
+  if (room.locked && user.id !== room.hostId) {
+    send(ws, { type: "error", code: "locked", message: "墙已锁定" });
+    return;
+  }
+  if (room.segments >= MAX_SEGMENTS) {
+    send(ws, { type: "error", code: "max_length", message: "墙已经够长了" });
+    return;
+  }
+  room.segments += 1;
+  broadcast(room, { type: "extend", segments: room.segments, userId: user.id });
+  pushSystem(room, `${user.name}把墙接长了一段`);
+  scheduleSave(room);
+}
+
+module.exports = {
+  handleJoin,
+  handleClose,
+  handleLeave,
+  handleKick,
+  handleRename,
+  handleLock,
+  handleExtend,
+};

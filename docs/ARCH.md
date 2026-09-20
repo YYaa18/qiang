@@ -8,10 +8,10 @@
 
 | 文件 | 行数 | 形态 |
 |---|---|---|
-| `server.js` | 1459 | 常量 → `Room` 类 → 约 60 个平铺函数 → 一个 switch → http |
+| ~~`server.js`~~ | ~~1459~~ → 89 | 已拆成 `src/` 下 12 个模块，见第二节 |
 | `public/app.js` | 2908 | 常量 → `els` → `state` → 渲染 → 输入 → 聊天 → 网络 → 门厅 |
 
-现在还读得动。但**玩法的本质是"在每个动作前后插一道判断"**，平铺结构应对它的唯一办法是往二十个 handler 里各塞几个 `if (room.mode)`。第一个玩法能塞进去，第二个就开始互相打架，第三个就没人敢动了。
+（下面这段是拆分前写的，留着说明当初为什么要拆。）现在还读得动。但**玩法的本质是"在每个动作前后插一道判断"**，平铺结构应对它的唯一办法是往二十个 handler 里各塞几个 `if (room.mode)`。第一个玩法能塞进去，第二个就开始互相打架，第三个就没人敢动了。
 
 所以：先改结构，再写玩法。而且要守住现在的三个优点——**不引入构建步骤、不引入框架、不引入数据库**。
 
@@ -82,26 +82,42 @@ for (const line of raw.split("\n")) { ... }
 
 ---
 
-## 二、服务端拆分
+## 二、服务端拆分　✅ 已完成
 
-纯搬运，不改逻辑，24 个 e2e 测试兜底。
+纯搬运，不改逻辑。`server.js` 从 1459 行降到 89 行，只剩接线。
 
 ```
-server.js              只剩接线：http / ws / 启动 / 优雅退出      ~150 行
+server.js         89   接线：http / ws / 心跳 / 清扫 / 优雅退出
 src/
-  room.js              Room 类、serialize / restore
-  store.js             存盘、惰性加载、驱逐
-  protocol.js          校验与归一化（validCode / asPoint / normalizeHex …）
-  net.js               send / broadcast / 预序列化 / 背压
-  bake.js              冻结、任务、存档
+  config.js       61   所有常量和环境变量
+  protocol.js     87   校验与归一化——客户端来的东西一律不可信
+  room.js        175   Room 类、serialize、发给客户端的那几种数据
+  net.js          43   send / broadcast（一条只序列化一次）/ 背压
+  store.js       204   房间在内存和磁盘之间的进出
+  bake.js        354   冻结、任务、按段存档
   wall/
-    draw.js            stroke_* / text_place / undo / redo
-    presence.js        join / leave / kick / lock / extend / clear / rename
-    chat.js            chat / cursor
-  modes/
-    index.js           注册表
-    relay.js           接龙 / 补全
+    presence.js  213   join / leave / kick / rename / lock / extend
+    draw.js      277   stroke_* / text_place / undo / redo
+    chat.js       76   chat / cursor 合并
+    clear.js      84   清空倒计时
+  dispatch.js     50   每条消息落到哪个处理函数
+  http.js        160   开房 / 取墨迹图 / 静态文件
 ```
+
+依赖是单向的，没有循环。唯一一条向上的边——`store` 读完房间要重建「清空倒计时」，而倒计时属于 `wall/clear`——用一个加载钩子断开：
+
+```js
+// store.js：读完一间房，让注册过的人各自把自己的定时器重建出来
+const loadHooks = [];
+function onRoomLoaded(fn) { loadHooks.push(fn); }
+
+// wall/clear.js
+onRoomLoaded(restoreClearTimer);
+```
+
+这不是为了拆而拆出来的仪式——**玩法的计时器（传棒倒计时、回合限时）以后要走的正是同一个口子**。
+
+核对过：81 个函数一个没少，19 种消息类型两边完全一致，常量全部保留，唯一新增的函数就是 `onRoomLoaded`。新增一项测试守住这个钩子（去掉注册它就会失败）。
 
 ---
 
@@ -194,7 +210,7 @@ public/
 
 1. ~~四处性能修复（1–4）~~ ✅ 已完成
 2. ~~第 5 节那几处顺带的（光标合并、烘焙退避、手机不当烘焙机）~~ ✅ 已完成
-3. 服务端拆分——纯搬运，测试兜底
+3. ~~服务端拆分——纯搬运，测试兜底~~ ✅ 已完成
 4. 规则层两个钩子——此时还没有任何玩法，`gate` 永远返回 null，行为完全不变
 5. 写第一个玩法 `relay.js`
 6. 客户端拆分——可以推迟到第二个玩法出现时再做
