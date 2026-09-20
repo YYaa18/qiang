@@ -100,10 +100,10 @@ class Client {
   }
 }
 
-async function join(port, { code, name, clientId }) {
+async function join(port, { code, name, clientId, weak }) {
   const c = new Client(port);
   await c.open();
-  c.send({ type: "join", code, name, clientId });
+  c.send({ type: "join", code, name, clientId, weak });
   return c;
 }
 
@@ -804,6 +804,51 @@ async function main() {
       ghost.send({ type: "join", code: "ZZZZ", name: "无", clientId: uuid() });
       const err = await ghost.wait("error");
       assert(err.code === "not_found", "a code that was never used is still not found");
+    });
+
+    await test("many cursor moves come back as one merged message", async () => {
+      const hostId = uuid();
+      const code = await createRoom(port, hostId);
+      const a = track(await join(port, { code, name: "甲", clientId: hostId }));
+      await a.wait("snapshot");
+      const b = track(await join(port, { code, name: "乙", clientId: uuid() }));
+      await b.wait("snapshot");
+      await a.wait("presence");
+
+      const before = b.msgs.length;
+      for (let i = 0; i < 40; i++) a.send({ type: "cursor", x: 100 + i, y: 200 + i });
+      await b.wait("cursors");
+      await delay(250); // 攒够几个 50ms 的窗口
+
+      const got = b.msgs.slice(before).filter((m) => m.type === "cursors");
+      assert(got.length > 0, "cursor updates arrive");
+      assert(got.length < 10, "40 moves merged into a handful, got " + got.length);
+      const last = got[got.length - 1];
+      assert(Array.isArray(last.list) && last.list[0].userId === hostId, "carries whose cursor it is");
+      assert(last.list[0].x === 139 && last.list[0].y === 239, "keeps the newest position, not a stale one");
+      assert(!b.msgs.some((m) => m.type === "cursor"), "the old one-per-move message is gone");
+    });
+
+    await test("a phone is not made the baker while a computer is around", async () => {
+      const hostId = uuid();
+      const code = await createRoom(port, hostId);
+      // 房主自己在手机上：平时房主优先烘焙，但手机要让位给电脑
+      const phone = track(await join(port, { code, name: "手机", clientId: hostId, weak: true }));
+      const psnap = await phone.wait("snapshot");
+      const pc = track(await join(port, { code, name: "电脑", clientId: uuid(), weak: false }));
+      const csnap = await pc.wait("snapshot");
+
+      drawStrokes(phone, psnap.you.color, 45, 300);
+      const task = await pc.wait("bake", 6000);
+      assert(task.mode === "delta", "the computer was asked to bake");
+      assert(!phone.msgs.some((m) => m.type === "bake"), "the phone was never asked");
+
+      // 电脑走了，只剩手机：总比不烘好
+      pc.send({ type: "leave" });
+      await phone.wait("presence");
+      drawStrokes(phone, csnap.you.color, 25, 700);
+      const fallback = await phone.wait("bake", 8000);
+      assert(fallback.mode, "the phone takes over once it is the only one left");
     });
 
     await test("the old single archive file is still readable", async () => {

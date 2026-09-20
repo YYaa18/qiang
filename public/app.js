@@ -1718,6 +1718,7 @@ function connect() {
       code: state.code,
       name: state.name,
       clientId: state.clientId,
+      weak: isMobile(), // 告诉服务端别挑我去烘焙，手机烘一段会卡一下
     });
   });
   ws.addEventListener("message", (ev) => {
@@ -1876,8 +1877,9 @@ function onMessage(msg) {
       if (typeof msg.canRedo === "boolean") state.canRedo = msg.canRedo;
       updateStacks();
       break;
-    case "cursor":
-      showCursor(msg);
+    case "cursors":
+      // 服务端把所有人的光标攒成一条发过来，自己那份由 showCursor 跳过
+      for (const c of msg.list || []) showCursor(c);
       break;
     case "chat":
       if (msg.message) onChatMessage(msg.message);

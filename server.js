@@ -37,6 +37,10 @@ const MAX_SEGMENTS = 500;
 const LIVE_KEEP = Number(process.env.QIANG_LIVE_KEEP) || 150;
 const BAKE_BATCH = Number(process.env.QIANG_BAKE_BATCH) || 200;
 const BAKE_TIMEOUT_MS = 30_000;
+const BAKE_RETRY_MS = 1000;
+const BAKE_RETRY_MAX_MS = 60_000;
+const BAKE_GIVE_UP = 6;
+const CURSOR_FLUSH_MS = 50; // 约 20Hz，肉眼看不出和实时的差别
 const BAKE_MAX_BYTES = 30 * 1024 * 1024;
 // 笔画点允许超出纸面的余量：canvas 自己会裁掉，避免拖出纸边时贴边画线
 const STROKE_MARGIN = 40;
@@ -90,6 +94,13 @@ class Room {
     this.dirtyFull = new Set();
     this.job = null;
     this.loadingFull = false; // 正在从存档读整段重画所需的笔画
+    this.bakeFails = 0; // 连续几次没烘成，用来决定退避多久
+    /** @type {ReturnType<typeof setTimeout>|null} */
+    this.bakeTimer = null;
+    /** @type {Map<string, {x:number,y:number}>} 待发的光标位置 */
+    this.cursors = new Map();
+    /** @type {ReturnType<typeof setTimeout>|null} */
+    this.cursorTimer = null;
     this.emptySince = 0; // 最后一个人离开的时刻，用来决定何时从内存请出去
     /** @type {Record<string, string>} */
     this.colorByUser = {};
@@ -259,7 +270,7 @@ function youInfo(room, user) {
 // 在别人屏幕上就永远是错的形状。
 const SOFT_BUFFER = 64 * 1024;
 const HARD_BUFFER = 2 * 1024 * 1024;
-const LOSSY = new Set(["cursor"]);
+const LOSSY = new Set(["cursors"]);
 
 function sendData(ws, data, lossy) {
   if (!ws || ws.readyState !== 1) return;
@@ -458,6 +469,10 @@ function evictRoom(room) {
     clearTimeout(t);
     saveTimers.delete(room.code);
   }
+  clearTimeout(room.bakeTimer);
+  clearTimeout(room.cursorTimer);
+  room.bakeTimer = null;
+  room.cursorTimer = null;
   try {
     saveRoomNow(room);
   } catch (err) {
@@ -609,9 +624,14 @@ function touchJob(room, id) {
   }
 }
 
+// 烘焙要在客户端把一段画成 2 倍分辨率的 PNG，手机干这活会明显卡一下。
+// 有电脑在场就让电脑烘，实在只剩手机了才用手机——总比不烘好。
 function pickBaker(room) {
   const online = [...room.users.values()].filter((u) => u.ws && u.ws.readyState === 1);
-  return online.find((u) => u.id === room.hostId) || online[0] || null;
+  if (!online.length) return null;
+  const strong = online.filter((u) => !u.weak);
+  const pool = strong.length ? strong : online;
+  return pool.find((u) => u.id === room.hostId) || pool[0];
 }
 
 // 存档只会越来越大，所以一行一行地读，而且必须是异步的：
@@ -744,7 +764,21 @@ function abortJob(room, reason) {
   for (const file of job.files.values()) fs.rmSync(file, { force: true });
   if (job.kind === "full") for (const seg of job.segs) room.dirtyFull.add(seg);
   room.job = null;
-  if (reason !== "cleared") setTimeout(() => maybeBake(room), 1000).unref?.();
+  if (reason === "cleared") return;
+  // 烘不出来就往后退一步再试，别一秒一次地空转。连着失败太多次就先搁着，
+  // 等有人推门进来（可能是台更合适的机器）再重新开始。
+  room.bakeFails += 1;
+  if (room.bakeFails > BAKE_GIVE_UP) {
+    console.error("bake gave up", room.code, reason);
+    return;
+  }
+  const wait = Math.min(BAKE_RETRY_MS * 2 ** (room.bakeFails - 1), BAKE_RETRY_MAX_MS);
+  clearTimeout(room.bakeTimer);
+  room.bakeTimer = setTimeout(() => {
+    room.bakeTimer = null;
+    maybeBake(room);
+  }, wait);
+  room.bakeTimer.unref?.();
 }
 
 async function handleBakeUpload(req, res, room, seg, jobId) {
@@ -821,6 +855,7 @@ function commitJob(room, job) {
     room.strokes = room.strokes.filter((st) => !job.ids.has(st.id));
     room.frozenUpTo = job.cutoff;
   }
+  room.bakeFails = 0;
   saveRoomNow(room);
   broadcast(room, { type: "baked", upTo: room.frozenUpTo, versions });
   maybeBake(room);
@@ -859,9 +894,11 @@ function handleJoin(ws, msg) {
     existing.name = name;
     existing.kicked = false;
     existing.replaced = false;
+    existing.weak = !!msg.weak; // 同一个人可能换了台机器回来
     bindSocket(ws, room, existing);
     send(ws, snapshotMsg(room, existing));
     broadcast(room, { type: "presence", users: publicUsers(room) }, existing.id);
+    retryBake(room);
     return;
   }
 
@@ -880,6 +917,7 @@ function handleJoin(ws, msg) {
     timer: null,
     kicked: false,
     replaced: false,
+    weak: !!msg.weak, // 手机／平板：尽量不让它去烘焙
   };
   room.users.set(clientId, user);
   bindSocket(ws, room, user);
@@ -887,6 +925,14 @@ function handleJoin(ws, msg) {
   pushSystem(room, `${name}来了`);
   broadcast(room, { type: "presence", users: publicUsers(room) });
   scheduleSave(room);
+  retryBake(room);
+}
+
+// 来了新人就当是新机会：把之前攒的失败次数清零，重新试一次
+function retryBake(room) {
+  room.bakeFails = 0;
+  clearTimeout(room.bakeTimer);
+  room.bakeTimer = null;
   maybeBake(room);
 }
 
@@ -1134,11 +1180,23 @@ function handleCursor(ws, msg) {
   const { room, user } = ctx;
   const p = asPoint(room, { x: msg.x, y: msg.y });
   if (!p) return;
-  broadcast(
-    room,
-    { type: "cursor", userId: user.id, x: p.x, y: p.y },
-    user.id
-  );
+  room.cursors.set(user.id, p);
+  if (room.cursorTimer) return;
+  room.cursorTimer = setTimeout(() => flushCursors(room), CURSOR_FLUSH_MS);
+  room.cursorTimer.unref?.();
+}
+
+// 四个人各自 20Hz 地发，就是 80 条消息在天上飞，而这只是装饰。
+// 攒一小会儿合成一条群发，客户端自己跳过自己那一份。
+function flushCursors(room) {
+  room.cursorTimer = null;
+  if (!room.cursors.size) return;
+  const list = [];
+  for (const [userId, p] of room.cursors) {
+    if (room.users.has(userId)) list.push({ userId, x: p.x, y: p.y });
+  }
+  room.cursors.clear();
+  if (list.length) broadcast(room, { type: "cursors", list });
 }
 
 function handleChat(ws, msg) {
