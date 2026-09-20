@@ -1124,6 +1124,83 @@ async function main() {
       for (const id of [...mine, theirs[0]]) assert(all.includes(id), "揭晓后全都看得见");
     });
 
+    await test("tell: the word reaches exactly one person", async () => {
+      const hostId = uuid();
+      const code = await createRoom(port, hostId);
+      const a = track(await join(port, { code, name: "甲", clientId: hostId }));
+      const asnap = await a.wait("snapshot");
+      const b = track(await join(port, { code, name: "乙", clientId: uuid() }));
+      const bsnap = await b.wait("snapshot");
+
+      a.send({ type: "mode", cmd: "start", mode: "tell" });
+      const am = await a.wait("mode");
+      const bm = await b.wait("mode");
+
+      const word = am.state.word;
+      assert(typeof word === "string" && word.length >= 2, "说的人拿到了词，got " + word);
+      assert(am.state.label.includes(word), "而且看得见它");
+
+      // 这是整个玩法的前提：画的人那一侧任何一条消息里都不能出现这个词
+      assert(bm.state.word === undefined, "画的人的状态里没有词");
+      const bEverything = JSON.stringify(b.msgs);
+      assert(!bEverything.includes(word), `画的人收到的所有消息里都没有「${word}」`);
+
+      // 说的人不能画
+      a.send({
+        type: "stroke_start",
+        id: uuid(),
+        strokeType: "pen",
+        color: asnap.you.color,
+        width: 8,
+        x: 100,
+        y: 100,
+      });
+      const err = await a.wait("error");
+      assert(err.code === "not_allowed" && err.message.includes("说的人"), "说的人动不了笔");
+
+      // 画的人照画不误
+      const drew = drawStrokes(b, bsnap.you.color, 1, 400);
+      await a.wait((m) => m.type === "stroke_end" && m.id === drew[0]);
+
+      // 说的人把词说漏了：拦下来
+      a.send({ type: "chat", text: `快画一个${word}啊` });
+      const chatErr = await a.wait((m) => m.type === "error" && m.message.includes("不能说"));
+      assert(chatErr, "说漏嘴被拦住了");
+      await delay(150);
+      assert(!JSON.stringify(b.msgs).includes(word), "那句话没有发出去");
+
+      // 只说形状就没事
+      a.send({ type: "chat", text: "先画一个长方形，上面加两个圆" });
+      await b.wait((m) => m.type === "chat" && m.message.text.includes("长方形"));
+
+      // 揭晓：谜底公布，墙回到平常的样子
+      a.send({ type: "mode", cmd: "reveal" });
+      await b.wait((m) => m.type === "chat" && m.message.text.includes(word));
+      const after = await b.wait((m) => m.type === "snapshot" && m.mode === null);
+      assert(after.strokes.some((s) => s.id === drew[0]), "画的东西都还在");
+    });
+
+    await test("tell: the word goes back on the wall when its holder leaves", async () => {
+      const hostId = uuid();
+      const code = await createRoom(port, hostId);
+      const a = track(await join(port, { code, name: "甲", clientId: hostId }));
+      await a.wait("snapshot");
+      const b = track(await join(port, { code, name: "乙", clientId: uuid() }));
+      await b.wait("snapshot");
+      a.send({ type: "mode", cmd: "start", mode: "tell" });
+      await b.wait("mode");
+
+      a.send({ type: "leave" });
+      const free = await b.wait((m) => m.type === "mode" && m.state.action && m.state.action.cmd === "take");
+      assert(free, "词回到了墙上");
+
+      // 乙接过来，会拿到一个新词——上一个人已经看过了
+      b.send({ type: "mode", cmd: "take" });
+      const took = await b.wait((m) => m.type === "mode" && m.state.word);
+      assert(took.state.word, "乙拿到了词");
+      assert(took.state.blocked === true, "现在轮到乙说，他不能画");
+    });
+
     await test("the plain wall is the default, the game is only ever on top of it", async () => {
       const hostId = uuid();
       const code = await createRoom(port, hostId);
