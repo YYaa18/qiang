@@ -4,6 +4,7 @@ const crypto = require("crypto");
 const http = require("http");
 const fs = require("fs");
 const path = require("path");
+const readline = require("readline");
 const { WebSocketServer } = require("ws");
 
 const PORT = Number(process.env.PORT) || 3000;
@@ -25,6 +26,8 @@ const GRACE_MS = 10_000;
 const CHAT_MAX = 100;
 const UNDO_MAX = 50;
 const NAME_MAX = 16;
+const IDLE_EVICT_MS = Number(process.env.QIANG_IDLE_EVICT_MS) || 10 * 60 * 1000; // 空了这么久就从内存里请出去
+const SWEEP_MS = Number(process.env.QIANG_SWEEP_MS) || 60 * 1000;
 // 墙是横向卷轴：由若干段拼成，每段 SEG_W×CANVAS_H，坐标全局连续
 const SEG_W = 1600;
 const CANVAS_H = 1000;
@@ -53,6 +56,9 @@ const MIME = {
 
 /** @type {Map<string, Room>} */
 const rooms = new Map();
+
+/** @type {Set<string>} 磁盘上有哪些房间码；不代表它此刻在内存里 */
+const knownCodes = new Set();
 /** @type {Map<string, ReturnType<typeof setTimeout>>} */
 const saveTimers = new Map();
 /** @type {Map<string, number>} */
@@ -83,6 +89,8 @@ class Room {
     /** @type {Set<number>} 需要从存档整段重画的段 */
     this.dirtyFull = new Set();
     this.job = null;
+    this.loadingFull = false; // 正在从存档读整段重画所需的笔画
+    this.emptySince = 0; // 最后一个人离开的时刻，用来决定何时从内存请出去
     /** @type {Record<string, string>} */
     this.colorByUser = {};
     /** @type {Record<string, { undo: string[], redo: string[] }>} */
@@ -144,7 +152,7 @@ function genCode() {
 function allocCode() {
   for (let i = 0; i < 2000; i++) {
     const c = genCode();
-    if (!rooms.has(c)) return c;
+    if (!rooms.has(c) && !knownCodes.has(c)) return c;
   }
   throw new Error("无法分配房间码");
 }
@@ -246,20 +254,43 @@ function youInfo(room, user) {
   };
 }
 
-function send(ws, obj) {
-  if (ws && ws.readyState === 1) {
+// 弱网手机会让发送缓冲区一直涨。光标这类丢一帧也看不出来的消息先丢；真堵死了就断开，
+// 客户端重连会拿到完整快照——比留着一个补不回来的半残连接好。笔迹消息绝不丢：丢了那一笔
+// 在别人屏幕上就永远是错的形状。
+const SOFT_BUFFER = 64 * 1024;
+const HARD_BUFFER = 2 * 1024 * 1024;
+const LOSSY = new Set(["cursor"]);
+
+function sendData(ws, data, lossy) {
+  if (!ws || ws.readyState !== 1) return;
+  const buffered = ws.bufferedAmount;
+  if (buffered > HARD_BUFFER) {
     try {
-      ws.send(JSON.stringify(obj));
+      ws.terminate();
     } catch {
       /* ignore */
     }
+    return;
+  }
+  if (lossy && buffered > SOFT_BUFFER) return;
+  try {
+    ws.send(data);
+  } catch {
+    /* ignore */
   }
 }
 
+function send(ws, obj) {
+  sendData(ws, JSON.stringify(obj), LOSSY.has(obj.type));
+}
+
+// 一条消息只序列化一次，再发给每个人
 function broadcast(room, obj, exceptId) {
+  const data = JSON.stringify(obj);
+  const lossy = LOSSY.has(obj.type);
   for (const u of room.users.values()) {
     if (exceptId && u.id === exceptId) continue;
-    send(u.ws, obj);
+    sendData(u.ws, data, lossy);
   }
 }
 
@@ -371,37 +402,85 @@ function restoreClearTimer(room) {
   room.clearTimer = setTimeout(() => finishClear(room), remain);
 }
 
-function loadRooms() {
+// 启动时只认房间码，不读内容：一台长期在线的服务器上房间只会越来越多，
+// 全读进内存迟早撑爆。真有人推门进来时才把那一间读起来。
+function scanRooms() {
   if (!fs.existsSync(DATA_DIR)) {
     fs.mkdirSync(DATA_DIR, { recursive: true });
     return;
   }
   for (const name of fs.readdirSync(DATA_DIR)) {
-    if (!name.endsWith(".json")) continue;
-    const file = path.join(DATA_DIR, name);
-    try {
-      const raw = JSON.parse(fs.readFileSync(file, "utf8"));
-      if (!raw || !raw.code) continue;
-      const room = new Room(raw.code, raw.hostId);
-      room.createdAt = raw.createdAt || room.createdAt;
-      room.locked = !!raw.locked;
-      room.strokes = Array.isArray(raw.strokes) ? raw.strokes : [];
-      room.chat = Array.isArray(raw.chat) ? raw.chat : [];
-      room.nextSeq = Number(raw.nextSeq) || 1;
-      room.segments = Math.min(MAX_SEGMENTS, Math.max(1, Math.floor(Number(raw.segments)) || 1));
-      room.colorByUser = raw.colorByUser || {};
-      room.stacks = raw.stacks || {};
-      room.clearDeadline = raw.clearDeadline || null;
-      room.frozenUpTo = Number(raw.frozenUpTo) || 0;
-      room.segVersions = raw.segVersions || {};
-      room.hiddenFrozen = new Set(raw.hiddenFrozen || []);
-      room.frozenIndex = raw.frozenIndex || {};
-      room.dirtyFull = new Set(raw.dirtyFull || []);
-      rooms.set(room.code, room);
-      restoreClearTimer(room);
-    } catch (err) {
-      console.error("load room failed", name, err.message);
+    if (name.endsWith(".json")) knownCodes.add(name.slice(0, -5));
+  }
+}
+
+function loadRoom(code) {
+  const file = path.join(DATA_DIR, `${code}.json`);
+  let raw;
+  try {
+    raw = JSON.parse(fs.readFileSync(file, "utf8"));
+  } catch (err) {
+    console.error("load room failed", code, err.message);
+    return null;
+  }
+  if (!raw || raw.code !== code) return null;
+  const room = new Room(raw.code, raw.hostId);
+  room.createdAt = raw.createdAt || room.createdAt;
+  room.locked = !!raw.locked;
+  room.strokes = Array.isArray(raw.strokes) ? raw.strokes : [];
+  room.chat = Array.isArray(raw.chat) ? raw.chat : [];
+  room.nextSeq = Number(raw.nextSeq) || 1;
+  room.segments = Math.min(MAX_SEGMENTS, Math.max(1, Math.floor(Number(raw.segments)) || 1));
+  room.colorByUser = raw.colorByUser || {};
+  room.stacks = raw.stacks || {};
+  room.clearDeadline = raw.clearDeadline || null;
+  room.frozenUpTo = Number(raw.frozenUpTo) || 0;
+  room.segVersions = raw.segVersions || {};
+  room.hiddenFrozen = new Set(raw.hiddenFrozen || []);
+  room.frozenIndex = raw.frozenIndex || {};
+  room.dirtyFull = new Set(raw.dirtyFull || []);
+  rooms.set(room.code, room);
+  restoreClearTimer(room);
+  return room;
+}
+
+function getRoom(code) {
+  const live = rooms.get(code);
+  if (live) return live;
+  if (!knownCodes.has(code)) return null;
+  return loadRoom(code);
+}
+
+// 人走空一段时间的房间从内存里请出去。存盘失败就先留着，宁可占内存也不能丢画。
+function evictRoom(room) {
+  const t = saveTimers.get(room.code);
+  if (t) {
+    clearTimeout(t);
+    saveTimers.delete(room.code);
+  }
+  try {
+    saveRoomNow(room);
+  } catch (err) {
+    console.error("evict save failed", room.code, err.message);
+    return;
+  }
+  rooms.delete(room.code);
+  lastSaveAt.delete(room.code); // 否则这张表会替房间继续占着地方
+}
+
+function sweepRooms() {
+  const now = Date.now();
+  for (const room of rooms.values()) {
+    // 还有人、还在烘焙、还在倒计时清空：都不能动
+    if (room.users.size > 0 || room.job || room.loadingFull || room.clearTimer) {
+      room.emptySince = 0;
+      continue;
     }
+    if (!room.emptySince) {
+      room.emptySince = now;
+      continue;
+    }
+    if (now - room.emptySince >= IDLE_EVICT_MS) evictRoom(room);
   }
 }
 
@@ -412,6 +491,7 @@ function createRoom(hostId) {
     room.colorByUser[hostId] = PALETTE[0];
   }
   rooms.set(code, room);
+  knownCodes.add(code);
   saveRoomNow(room);
   return room;
 }
@@ -462,7 +542,13 @@ function roomDir(room) {
   return path.join(DATA_DIR, room.code);
 }
 
-function archiveFile(room) {
+// 存档按段分文件：重画某一段时只读那一段，不必翻完整个房间的历史。
+// archive.jsonl 是早期的整包存档，只读不写，老房间的数据仍然有效。
+function segArchiveFile(room, seg) {
+  return path.join(roomDir(room), `archive-${seg}.jsonl`);
+}
+
+function legacyArchiveFile(room) {
   return path.join(roomDir(room), "archive.jsonl");
 }
 
@@ -528,31 +614,57 @@ function pickBaker(room) {
   return online.find((u) => u.id === room.hostId) || online[0] || null;
 }
 
-function readArchive(room) {
-  let raw;
+// 存档只会越来越大，所以一行一行地读，而且必须是异步的：
+// 同步读会把整个进程——所有房间——一起卡住。
+async function eachArchiveLine(file, onStroke) {
+  if (!fs.existsSync(file)) return;
+  const rl = readline.createInterface({
+    input: fs.createReadStream(file, { encoding: "utf8" }),
+    crlfDelay: Infinity,
+  });
   try {
-    raw = fs.readFileSync(archiveFile(room), "utf8");
-  } catch {
-    return [];
-  }
-  const out = [];
-  for (const line of raw.split("\n")) {
-    if (!line) continue;
-    try {
-      out.push(JSON.parse(line));
-    } catch {
-      /* 半行（崩溃时写到一半）直接跳过 */
+    for await (const line of rl) {
+      if (!line) continue;
+      let st;
+      try {
+        st = JSON.parse(line);
+      } catch {
+        continue; // 半行（崩溃时写到一半）直接跳过
+      }
+      if (st && st.id) onStroke(st);
     }
+  } finally {
+    rl.close();
   }
+}
+
+// 整段重画要用到的笔：这一段自己的存档，外加老版本整包存档里落在这一段的
+async function readSegArchive(room, seg) {
+  const out = [];
+  const seen = new Set();
+  const take = (st) => {
+    if (seen.has(st.id)) return;
+    if (st.seq > room.frozenUpTo || room.hiddenFrozen.has(st.id)) return;
+    seen.add(st.id);
+    out.push(st);
+  };
+  await eachArchiveLine(segArchiveFile(room, seg), take);
+  await eachArchiveLine(legacyArchiveFile(room), (st) => {
+    if (segsOf(room, st).includes(seg)) take(st);
+  });
+  out.sort((a, b) => a.seq - b.seq); // 叠放顺序必须按 seq，不能按文件里的先后
   return out;
 }
 
 function maybeBake(room) {
-  if (room.job) return;
+  if (room.job || room.loadingFull) return;
   const baker = pickBaker(room);
   if (!baker) return;
   if (room.dirtyFull.size) {
-    startFullJob(room, baker);
+    startFullJob(room, baker).catch((err) => {
+      room.loadingFull = false;
+      console.error("full bake failed", room.code, err.message);
+    });
     return;
   }
   if (room.strokes.length <= LIVE_KEEP + BAKE_BATCH) return;
@@ -572,13 +684,32 @@ function maybeBake(room) {
   startJob(room, baker, "delta", tasks, { cutoff, frozen, ids: new Set(frozen.map((st) => st.id)) });
 }
 
-function startFullJob(room, baker) {
+async function startFullJob(room, baker) {
   const segs = [...room.dirtyFull];
   room.dirtyFull.clear();
-  const tasks = new Map(segs.map((seg) => [seg, []]));
-  for (const st of readArchive(room)) {
-    if (st.seq > room.frozenUpTo || room.hiddenFrozen.has(st.id)) continue;
-    for (const seg of segsOf(room, st)) if (tasks.has(seg)) tasks.get(seg).push(st);
+  const giveBack = () => {
+    for (const seg of segs) room.dirtyFull.add(seg);
+  };
+  const tasks = new Map();
+  room.loadingFull = true;
+  try {
+    for (const seg of segs) tasks.set(seg, await readSegArchive(room, seg));
+  } catch (err) {
+    console.error("read archive failed", room.code, err.message);
+    giveBack();
+    return;
+  } finally {
+    room.loadingFull = false;
+  }
+  // 读盘要花时间，期间房间可能已经被清空、被请出内存，或者烘焙的人已经走了
+  if (rooms.get(room.code) !== room || room.job) {
+    giveBack();
+    return;
+  }
+  const still = room.users.get(baker.id);
+  if (!still || !still.ws || still.ws.readyState !== 1) {
+    giveBack();
+    return;
   }
   startJob(room, baker, "full", tasks, { segs });
 }
@@ -671,13 +802,21 @@ function commitJob(room, job) {
   if (job.kind === "delta") {
     // 先追加存档，再改元数据：中途崩溃最多在存档里多一份重复的笔，重画时无害
     const stacked = stackedIds(room);
-    const lines = [];
+    const bySeg = new Map();
     for (const st of job.frozen) {
-      lines.push(JSON.stringify(st));
+      const line = JSON.stringify(st);
+      const segs = segsOf(room, st);
+      for (const seg of segs) {
+        if (!bySeg.has(seg)) bySeg.set(seg, []);
+        bySeg.get(seg).push(line);
+      }
       if (st.hidden) room.hiddenFrozen.add(st.id);
-      if (stacked.has(st.id)) room.frozenIndex[st.id] = segsOf(room, st);
+      if (stacked.has(st.id)) room.frozenIndex[st.id] = segs;
     }
-    fs.appendFileSync(archiveFile(room), lines.join("\n") + "\n");
+    fs.mkdirSync(roomDir(room), { recursive: true });
+    for (const [seg, lines] of bySeg) {
+      fs.appendFileSync(segArchiveFile(room, seg), lines.join("\n") + "\n");
+    }
     for (const id of Object.keys(room.frozenIndex)) if (!stacked.has(id)) delete room.frozenIndex[id];
     room.strokes = room.strokes.filter((st) => !job.ids.has(st.id));
     room.frozenUpTo = job.cutoff;
@@ -694,11 +833,11 @@ function handleJoin(ws, msg) {
     send(ws, { type: "error", code: "invalid", message: "身份无效" });
     return;
   }
-  if (!validCode(code) || !rooms.has(code)) {
+  const room = validCode(code) ? getRoom(code) : null;
+  if (!room) {
     send(ws, { type: "error", code: "not_found", message: "没有这面墙" });
     return;
   }
-  const room = rooms.get(code);
   const name = cleanName(msg.name);
   const existing = room.users.get(clientId);
 
@@ -1327,6 +1466,8 @@ async function handleHttp(req, res) {
   // /api/rooms/CODE/seg/N.png?v=V 取墨迹图；POST /api/rooms/CODE/seg/N?job=J 上传烘焙结果
   const segMatch = url.pathname.match(/^\/api\/rooms\/([A-Z0-9]{4})\/seg\/(\d+)(\.png)?$/);
   if (segMatch) {
+    // 这里只用内存里的房间：取墨迹图的一定是连着的人，房间必然在内存里。
+    // 用 getRoom 的话，随便猜房间码的请求就能把一屋子房间拽进内存。
     const room = rooms.get(segMatch[1]);
     const seg = Number(segMatch[2]);
     if (!room || seg >= room.segments) {
@@ -1398,7 +1539,7 @@ async function handleHttp(req, res) {
   });
 }
 
-loadRooms();
+scanRooms();
 
 const server = http.createServer((req, res) => {
   handleHttp(req, res).catch((err) => {
@@ -1442,9 +1583,13 @@ const heartbeat = setInterval(() => {
 }, 15000);
 heartbeat.unref?.();
 
+const sweeper = setInterval(sweepRooms, SWEEP_MS);
+sweeper.unref?.();
+
 
 function shutdown() {
   clearInterval(heartbeat);
+  clearInterval(sweeper);
   flushAll();
   wss.close();
   server.close(() => process.exit(0));

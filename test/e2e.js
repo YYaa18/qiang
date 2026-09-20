@@ -131,7 +131,7 @@ async function waitHealth(port, tries = 50) {
   throw new Error(`server on ${port} did not become healthy`);
 }
 
-function startServer(port, dataDir) {
+function startServer(port, dataDir, extraEnv = {}) {
   const logs = [];
   const proc = spawn(process.execPath, [SERVER], {
     cwd: ROOT,
@@ -142,6 +142,10 @@ function startServer(port, dataDir) {
       // 冻结阈值调小，测试里画几十笔就能触发
       QIANG_LIVE_KEEP: "20",
       QIANG_BAKE_BATCH: "20",
+      // 空房间几乎立刻请出内存，好验证「再推门进来还在」
+      QIANG_IDLE_EVICT_MS: "120",
+      QIANG_SWEEP_MS: "60",
+      ...extraEnv,
     },
     stdio: ["ignore", "pipe", "pipe"],
   });
@@ -684,8 +688,9 @@ async function main() {
       assert(bsnap.strokes.every((st) => st.seq > 21), "snapshot only carries live strokes");
       assert(bsnap.strokes.length === 24, "live tail only, got " + bsnap.strokes.length);
 
-      const archive = fs.readFileSync(path.join(dataDir, code, "archive.jsonl"), "utf8").trim().split("\n");
-      assert(archive.length === 21, "vector archive kept on disk");
+      const archive = fs.readFileSync(path.join(dataDir, code, "archive-0.jsonl"), "utf8").trim().split("\n");
+      assert(archive.length === 21, "vector archive kept on disk, split per segment");
+      assert(!fs.existsSync(path.join(dataDir, code, "archive.jsonl")), "no more single growing archive");
       const meta = JSON.parse(fs.readFileSync(path.join(dataDir, `${code}.json`), "utf8"));
       assert(meta.frozenUpTo === 21 && meta.strokes.length === 24, "meta file stays small");
     });
@@ -757,6 +762,81 @@ async function main() {
       assert(snap.chat.some((m) => m.text === "还在"), "chat restored");
       assert(snap.you.canUndo === true, "can undo own stroke after restart");
       assert(snap.segments === 2, "segments restored, got " + snap.segments);
+    });
+
+    await test("an empty room leaves memory but is still there when you push the door", async () => {
+      const hostId = uuid();
+      const code = await createRoom(port, hostId);
+      const a = track(await join(port, { code, name: "甲", clientId: hostId }));
+      const asnap = await a.wait("snapshot");
+      const sid = uuid();
+      a.send({
+        type: "stroke_start",
+        id: sid,
+        strokeType: "pen",
+        color: asnap.you.color,
+        width: 8,
+        x: 30,
+        y: 40,
+      });
+      a.send({ type: "stroke_point", id: sid, points: [{ x: 60, y: 80 }] });
+      a.send({ type: "stroke_end", id: sid });
+      await a.wait((m) => m.type === "stroke_end" && m.id === sid);
+
+      a.send({ type: "leave" });
+      await delay(400); // 扫一遍（60ms）+ 空置阈值（120ms），足够被请出内存
+
+      // 直接改盘上的文件：只有真的从内存里出去了，再进来才会看见这句话
+      const file = path.join(dataDir, `${code}.json`);
+      const onDisk = JSON.parse(fs.readFileSync(file, "utf8"));
+      onDisk.chat.push({ id: uuid(), userId: "system", text: "只在盘上", t: Date.now() });
+      fs.writeFileSync(file, JSON.stringify(onDisk));
+
+      const again = track(await join(port, { code, name: "甲", clientId: hostId }));
+      const snap = await again.wait("snapshot");
+      assert(snap.chat.some((m) => m.text === "只在盘上"), "room really left memory and was read back from disk");
+      assert(snap.you.isHost === true, "still the host after the room was evicted");
+      assert(snap.strokes.some((s) => s.id === sid), "the stroke came back too");
+      assert(snap.you.canUndo === true, "undo stack came back too");
+
+      const ghost = track(new Client(port));
+      await ghost.open();
+      ghost.send({ type: "join", code: "ZZZZ", name: "无", clientId: uuid() });
+      const err = await ghost.wait("error");
+      assert(err.code === "not_found", "a code that was never used is still not found");
+    });
+
+    await test("the old single archive file is still readable", async () => {
+      const hostId = uuid();
+      const code = await createRoom(port, hostId);
+      const a = track(await join(port, { code, name: "甲", clientId: hostId }));
+      const asnap = await a.wait("snapshot");
+      const b = track(await join(port, { code, name: "乙", clientId: uuid() }));
+      const bsnap = await b.wait("snapshot");
+      const mine = drawStrokes(a, asnap.you.color, 5, 300);
+      await a.wait((m) => m.type === "stroke_end" && m.id === mine[4]);
+      drawStrokes(b, bsnap.you.color, 36, 900);
+      await serveBakes(a, port, code);
+
+      // 把按段存档搬回老格式，模拟一个从旧版本升上来的房间
+      const dir = path.join(dataDir, code);
+      const perSeg = fs.readdirSync(dir).filter((n) => /^archive-\d+\.jsonl$/.test(n));
+      assert(perSeg.length > 0, "per-segment archive was written");
+      let merged = "";
+      for (const n of perSeg) {
+        merged += fs.readFileSync(path.join(dir, n), "utf8");
+        fs.rmSync(path.join(dir, n));
+      }
+      fs.writeFileSync(path.join(dir, "archive.jsonl"), merged);
+
+      // 撤销一笔已冻结的笔：只剩老存档也要能整段重画
+      a.send({ type: "undo" });
+      await b.wait("undo");
+      const full = await serveBakes(a, port, code);
+      assert(full.tasks[0].mode === "full", "full re-bake requested");
+      const ids = full.tasks[0].strokes.map((st) => st.id);
+      assert(ids.includes(mine[3]), "strokes read back out of the legacy archive");
+      assert(!ids.includes(mine[4]), "the undone stroke stays out");
     });
   } finally {
     for (const c of clients) {
