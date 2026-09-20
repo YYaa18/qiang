@@ -974,9 +974,11 @@ async function main() {
       const after = await b.wait("snapshot"); // 揭晓时每个人重拿一份整墙
       const ids = after.strokes.map((s) => s.id);
       for (const id of hidden) assert(ids.includes(id), "揭晓后全都看得见");
-      assert(after.mode.revealed === true, "状态里也写着揭晓了");
 
-      // 揭晓之后这面墙就是普通的墙，谁都能画
+      // 揭晓就是这局的终点：墙回到平常的样子，一点玩法的痕迹都不留
+      assert(after.mode === null, "玩法已经摘掉了，got " + JSON.stringify(after.mode));
+
+      // 于是这面墙又是普通的墙了，谁都能画
       const mine = drawStrokes(b, "#3B5BDB", 1, 900);
       const landed = await a.wait((m) => m.type === "stroke_end" && m.id === mine[0]);
       assert(landed, "乙现在画得了，甲也看得见");
@@ -1021,6 +1023,80 @@ async function main() {
       assert(snap.mode && snap.mode.id === "relay", "接龙还在");
       assert(snap.mode.holder === null, "笔还在墙上等人拿");
       assert(snap.mode.legCount === 2, "已经画过的段数还记得，got " + snap.mode.legCount);
+    });
+
+    await test("the plain wall is the default, the game is only ever on top of it", async () => {
+      const hostId = uuid();
+      const code = await createRoom(port, hostId);
+      const a = track(await join(port, { code, name: "甲", clientId: hostId }));
+      const asnap = await a.wait("snapshot");
+      const b = track(await join(port, { code, name: "乙", clientId: uuid() }));
+      const bsnap = await b.wait("snapshot");
+
+      // 新开的墙没有任何玩法，两个人都能随便画
+      assert(asnap.mode === null && bsnap.mode === null, "默认没有玩法");
+      const free = drawStrokes(b, bsnap.you.color, 1, 200);
+      await a.wait((m) => m.type === "stroke_end" && m.id === free[0]);
+
+      // 开一局、再结束，墙必须回到原来的样子
+      a.send({ type: "mode", cmd: "start", mode: "relay" });
+      await b.wait("mode");
+      a.send({ type: "mode", cmd: "stop" });
+      await b.wait((m) => m.type === "snapshot" && m.mode === null);
+
+      const c = track(await join(port, { code, name: "丙", clientId: uuid() }));
+      const csnap = await c.wait("snapshot");
+      assert(csnap.mode === null, "后来的人看到的是一面平常的墙");
+      assert(csnap.strokes.some((s) => s.id === free[0]), "之前画的东西都还在");
+      const again = drawStrokes(c, csnap.you.color, 1, 500);
+      const ok = await a.wait((m) => m.type === "stroke_end" && m.id === again[0]);
+      assert(ok, "谁都能画，和从没开过玩法一样");
+    });
+
+    await test("freezing pauses during a game and resumes when it ends", async () => {
+      const hostId = uuid();
+      const code = await createRoom(port, hostId);
+      const a = track(await join(port, { code, name: "甲", clientId: hostId }));
+      const asnap = await a.wait("snapshot");
+      a.send({ type: "mode", cmd: "start", mode: "relay" });
+      await a.wait("mode");
+
+      // 画到平时早就该冻结的量。墨迹图是一张谁都能取的 PNG，
+      // 藏着的笔画绝不能烘进去——所以这期间一次都不该烘。
+      drawStrokes(a, asnap.you.color, 45, 200);
+      await delay(800);
+      assert(!a.msgs.some((m) => m.type === "bake"), "接龙期间一次都没烘");
+
+      // 但这不能是永久的：玩法一结束，冻结就得接着干，
+      // 否则这个房间的笔画会一直堆在内存和存盘文件里
+      a.send({ type: "mode", cmd: "reveal" });
+      await a.wait((m) => m.type === "snapshot" && m.mode === null);
+      drawStrokes(a, asnap.you.color, 1, 600);
+      const task = await a.wait("bake", 6000);
+      assert(task.mode === "delta", "玩法结束后冻结恢复了");
+    });
+
+    await test("clearing the wall ends whatever game was running", async () => {
+      const hostId = uuid();
+      const code = await createRoom(port, hostId);
+      const a = track(await join(port, { code, name: "甲", clientId: hostId }));
+      await a.wait("snapshot");
+      const b = track(await join(port, { code, name: "乙", clientId: uuid() }));
+      await b.wait("snapshot");
+      a.send({ type: "mode", cmd: "start", mode: "relay" });
+      await b.wait("mode");
+
+      a.send({ type: "clear_start" });
+      await b.wait("clear_start");
+      await b.wait("clear_done", 9000);
+
+      // 清空就是回到一面新的墙，接龙不该在那儿接着等
+      const c = track(await join(port, { code, name: "丙", clientId: uuid() }));
+      const csnap = await c.wait("snapshot");
+      assert(csnap.mode === null, "清空之后没有玩法在跑了");
+      const mine = drawStrokes(c, csnap.you.color, 1, 300);
+      const ok = await a.wait((m) => m.type === "stroke_end" && m.id === mine[0]);
+      assert(ok, "任何人都能在空墙上画");
     });
 
     await test("the old single archive file is still readable", async () => {

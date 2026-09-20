@@ -1424,6 +1424,7 @@ function renderTools() {
   document.querySelectorAll(".host-only").forEach((el) => {
     el.hidden = !host;
   });
+  renderRelay(); // 「揭晓」只在接龙进行中才出现，得盖过上面那句统一开关
   els.menuLock.textContent = state.locked ? "解锁画布" : "锁定画布";
 }
 

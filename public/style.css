@@ -303,6 +303,23 @@ button:disabled { opacity: 0.4; cursor: default; }
   line-height: 1.4;
 }
 
+/* 玩法和日常操作之间隔一道，免得读起来像是墙的固有功能 */
+.menu-sep {
+  height: 1px;
+  margin: 6px 0;
+  background: var(--line);
+}
+.menu-sep[hidden] { display: none; }
+
+.menu-label {
+  margin: 0;
+  padding: 4px 12px 2px;
+  color: var(--muted);
+  font-size: 11px;
+  letter-spacing: 0.04em;
+}
+.menu-label[hidden] { display: none; }
+
 #workspace {
   flex: 1;
   display: flex;

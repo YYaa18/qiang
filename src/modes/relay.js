@@ -109,6 +109,17 @@ function publicFor(room, user) {
   };
 }
 
+// 揭晓就是这局的终点：把整条卷轴交还给所有人，然后把玩法摘掉。
+// 留着一个 revealed 的玩法状态没有任何用处，只会让墙一直顶着一条横幅，
+// 而且会让「藏着笔画时不烘焙」那条规则永远生效，旧笔再也冻结不了。
+function finish(room, api) {
+  const n = legs(room).length;
+  room.mode.revealed = true;
+  api.end(); // 先摘掉玩法，下面那一份整墙才是干干净净的
+  presence.resend(room);
+  pushSystem(room, `接龙揭晓了 · 整条卷轴一共 ${n} 段，都看得见了`);
+}
+
 function nameOf(room, id) {
   const u = room.users.get(id);
   return u ? u.name : "某人";
@@ -129,13 +140,9 @@ module.exports = register({
     announce(room, api);
   },
 
+  // 中途结束也等于揭晓：不然那些藏起来的笔画谁也看不到了
   stop(room, user, api) {
-    // 结束就等于揭晓：不然那些藏起来的笔画谁也看不到了
-    const wasHidden = !room.mode.revealed;
-    room.mode.revealed = true;
-    pushSystem(room, "接龙结束了，整面墙都看得见了");
-    announce(room, api);
-    if (wasHidden) presence.resend(room);
+    finish(room, api);
   },
 
   // ───────────── 闸门 ─────────────
@@ -208,10 +215,7 @@ module.exports = register({
     if (cmd === "reveal") {
       if (user.id !== room.hostId) return;
       if (m.revealed) return;
-      m.revealed = true;
-      pushSystem(room, "揭晓了，从头看看画成了什么");
-      announce(room, api);
-      presence.resend(room); // 藏着的笔画现在才发得出去，每个人重拿一份整墙
+      finish(room, api);
       return;
     }
   },

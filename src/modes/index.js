@@ -88,6 +88,12 @@ function apiFor(room) {
   return {
     broadcast: (obj) => broadcast(room, obj),
     save: () => scheduleSave(room),
+    // 玩法宣告自己结束。墙立刻回到平常的样子，不留痕迹——
+    // 默认的墙才是这个产品，玩法只是临时盖在上面的一层。
+    end: () => {
+      room.mode = null;
+      scheduleSave(room);
+    },
   };
 }
 

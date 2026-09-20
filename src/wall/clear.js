@@ -64,6 +64,7 @@ function finishClear(room) {
   room.hiddenFrozen = new Set();
   room.frozenIndex = {};
   room.dirtyFull = new Set();
+  room.mode = null; // 清空就是回到一面新的墙，正在玩的也一并结束
   fs.rmSync(roomDir(room), { recursive: true, force: true });
   broadcast(room, { type: "clear_done" });
   pushSystem(room, "墙被清空了");
