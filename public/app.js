@@ -639,7 +639,9 @@ function pencilPattern(color) {
 }
 
 function sortedStrokes() {
-  return state.strokes.filter((s) => !s.hidden).sort((a, b) => a.seq - b.seq);
+  return state.strokes
+    .filter((s) => !s.hidden && !myInkHidden(s))
+    .sort((a, b) => a.seq - b.seq);
 }
 
 // 画出第 i 段：先铺墨迹图（已冻结的笔），再按 seq 叠上之后的矢量笔（ctx 已平移到该段）
@@ -747,8 +749,13 @@ async function bakeSegment(task) {
 }
 
 function redrawLive() {
-  const lives = [...state.live.values()].sort((a, b) => a.seq - b.seq);
-  if (state.current && !state.live.has(state.current.id)) lives.push(state.current);
+  const lives = [...state.live.values()]
+    .filter((s) => !myInkHidden(s))
+    .sort((a, b) => a.seq - b.seq);
+  // 正在画的这一笔也一样：盲画的关键就在这里，落笔时纸上什么都不出现
+  if (state.current && !state.live.has(state.current.id) && !myInkHidden(state.current)) {
+    lives.push(state.current);
+  }
   const boxes = lives.map((s) => [s, strokeBox(s)]);
   for (const tile of state.tiles.values()) {
     const lo = tile.i * SEG_W;
@@ -1315,6 +1322,14 @@ function modeNow() {
 function modeBlocks() {
   const m = modeNow();
   return !!(m && m.blocked);
+}
+
+// 盲画：自己的笔迹自己看不见。服务端不会把它发回给我，但本地还留着一份
+// 乐观副本（画的时候总得先画出来才顺手），所以这里也得把它拦住。
+function myInkHidden(s) {
+  const m = modeNow();
+  if (!m || !m.hideOwnInk) return false;
+  return !!(state.you && s.userId === state.you.id);
 }
 
 function renderModeBar() {
@@ -2027,10 +2042,16 @@ function onMessage(msg) {
       break;
     case "mode": {
       const had = !!(state.mode && state.mode.drawable);
+      const hidBefore = !!(state.mode && state.mode.hideOwnInk);
       state.mode = msg.state || null;
       renderModeBar();
       updateExtendUi();
       updateDrawingHint();
+      // 藏不藏自己的笔迹变了，整墙得重画一遍
+      if (hidBefore !== !!(state.mode && state.mode.hideOwnInk)) {
+        rebuildInk();
+        redrawLive();
+      }
       // 刚轮到我：把镜头带到我能画的那一段
       if (!had && state.mode && state.mode.drawable) lookAtDrawable();
       break;

@@ -15,6 +15,7 @@ const modes = require("./modes");
 // 而 wall/* 又引用 modes——让 index 去 require 它们就绕回来了。
 require("./modes/relay");
 require("./modes/limit");
+require("./modes/blind");
 
 const ROUTES = {
   join: (ws, msg) => presence.handleJoin(ws, msg),

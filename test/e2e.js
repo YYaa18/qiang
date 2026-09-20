@@ -1077,6 +1077,53 @@ async function main() {
       assert(ok, "还回来的那一笔真的能用");
     });
 
+    await test("blind: only the person drawing cannot see it", async () => {
+      const hostId = uuid();
+      const code = await createRoom(port, hostId);
+      const a = track(await join(port, { code, name: "甲", clientId: hostId }));
+      const asnap = await a.wait("snapshot");
+      const b = track(await join(port, { code, name: "乙", clientId: uuid() }));
+      const bsnap = await b.wait("snapshot");
+
+      a.send({ type: "mode", cmd: "start", mode: "blind" });
+      const am = await a.wait("mode");
+      assert(am.state.hideOwnInk === true, "客户端被告知别渲染自己的笔迹");
+      assert(am.state.blocked !== true, "盲画不拦任何人，照画");
+
+      // 甲画，甲自己收不到回声；乙看得一清二楚
+      const mine = drawStrokes(a, asnap.you.color, 2, 300);
+      await b.wait((m) => m.type === "stroke_end" && m.id === mine[1]);
+      await delay(150);
+      assert(
+        !a.msgs.some((m) => m.type === "stroke_end" && mine.includes(m.id)),
+        "甲没收到自己那两笔的回声"
+      );
+
+      // 乙画的，甲看得见——只有自己画的才藏
+      const theirs = drawStrokes(b, bsnap.you.color, 1, 800);
+      const saw = await a.wait((m) => m.type === "stroke_end" && m.id === theirs[0]);
+      assert(saw, "别人画的照样看得见，这正是和接龙相反的地方");
+
+      // 新来的人拿到的整墙里，也没有他自己的（他还没画）——但有别人的全部
+      const c = track(await join(port, { code, name: "丙", clientId: uuid() }));
+      const csnap = await c.wait("snapshot");
+      assert(csnap.strokes.length === 3, "丙看得见所有人画的，got " + csnap.strokes.length);
+
+      // 甲自己重连，快照里仍然没有他画的
+      a.send({ type: "leave" });
+      const a2 = track(await join(port, { code, name: "甲", clientId: hostId }));
+      const a2snap = await a2.wait("snapshot");
+      const ids = a2snap.strokes.map((s) => s.id);
+      assert(!ids.includes(mine[0]) && !ids.includes(mine[1]), "重连也看不见自己画的");
+      assert(ids.includes(theirs[0]), "但看得见别人画的");
+
+      // 揭晓：第一次看见自己干了什么，并且墙回到平常的样子
+      a2.send({ type: "mode", cmd: "reveal" });
+      const after = await a2.wait((m) => m.type === "snapshot" && m.mode === null);
+      const all = after.strokes.map((s) => s.id);
+      for (const id of [...mine, theirs[0]]) assert(all.includes(id), "揭晓后全都看得见");
+    });
+
     await test("the plain wall is the default, the game is only ever on top of it", async () => {
       const hostId = uuid();
       const code = await createRoom(port, hostId);
