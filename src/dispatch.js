@@ -17,6 +17,7 @@ require("./modes/relay");
 require("./modes/limit");
 require("./modes/blind");
 require("./modes/tell");
+require("./modes/turf");
 
 const ROUTES = {
   join: (ws, msg) => presence.handleJoin(ws, msg),

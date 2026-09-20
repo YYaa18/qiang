@@ -1201,6 +1201,102 @@ async function main() {
       assert(took.state.blocked === true, "现在轮到乙说，他不能画");
     });
 
+    // 沿一条横线涂一笔，用来精确地占格子
+    function paint(c, color, x0, x1, y) {
+      const id = uuid();
+      c.send({ type: "stroke_start", id, strokeType: "pen", color, width: 24, x: x0, y });
+      const pts = [];
+      for (let x = x0 + 20; x <= x1; x += 20) pts.push({ x, y });
+      c.send({ type: "stroke_point", id, points: pts });
+      c.send({ type: "stroke_end", id });
+      return id;
+    }
+
+    await test("turf: painting the same place twice does not count twice", async () => {
+      const hostId = uuid();
+      const code = await createRoom(port, hostId);
+      const a = track(await join(port, { code, name: "甲", clientId: hostId }));
+      const asnap = await a.wait("snapshot");
+
+      a.send({ type: "mode", cmd: "start", mode: "turf", seconds: 300 });
+      await a.wait("mode");
+
+      const one = paint(a, asnap.you.color, 100, 900, 400);
+      await a.wait((m) => m.type === "stroke_end" && m.id === one);
+      const first = await a.wait((m) => m.type === "mode" && m.state.scores.length);
+      const cells = first.state.scores[0].cells;
+      assert(cells > 20, "涂出来的地盘有点大小，got " + cells);
+
+      // 原地再涂一遍。按长度乘粗细去累加的话这里会翻倍——那正是要避免的
+      const two = paint(a, asnap.you.color, 100, 900, 400);
+      await a.wait((m) => m.type === "stroke_end" && m.id === two);
+      await delay(1400); // 分数一秒最多播一次
+      const again = a.msgs.filter((m) => m.type === "mode").pop();
+      assert(
+        again.state.scores[0].cells === cells,
+        `涂第二遍不该多算：${cells} → ${again.state.scores[0].cells}`
+      );
+    });
+
+    await test("turf: painting over someone takes their ground", async () => {
+      const hostId = uuid();
+      const code = await createRoom(port, hostId);
+      const a = track(await join(port, { code, name: "甲", clientId: hostId }));
+      const asnap = await a.wait("snapshot");
+      const b = track(await join(port, { code, name: "乙", clientId: uuid() }));
+      const bsnap = await b.wait("snapshot");
+
+      a.send({ type: "mode", cmd: "start", mode: "turf", seconds: 300 });
+      await a.wait("mode");
+
+      const mine = paint(a, asnap.you.color, 100, 900, 400);
+      await a.wait((m) => m.type === "stroke_end" && m.id === mine);
+      await delay(1200);
+      const before = a.msgs.filter((m) => m.type === "mode").pop().state.scores;
+      const aBefore = before.find((r) => r.userId === hostId).cells;
+
+      // 乙照着甲那一笔涂过去
+      const over = paint(b, bsnap.you.color, 100, 900, 400);
+      await a.wait((m) => m.type === "stroke_end" && m.id === over);
+      await delay(1400);
+      const after = a.msgs.filter((m) => m.type === "mode").pop().state.scores;
+      const aAfter = (after.find((r) => r.userId === hostId) || { cells: 0 }).cells;
+      const bAfter = after.find((r) => r.userId !== hostId).cells;
+
+      assert(aAfter < aBefore / 2, `甲的地被抢走大半：${aBefore} → ${aAfter}`);
+      assert(bAfter > aAfter, `乙抢过来了：乙 ${bAfter} vs 甲 ${aAfter}`);
+
+      // 场地是定的，接长不了
+      a.send({ type: "extend" });
+      const err = await a.wait((m) => m.type === "error" && m.code === "not_allowed");
+      assert(err.message.includes("场地"), "接长被挡住，got " + err.message);
+    });
+
+    await test("turf: the clock runs out on its own and names a winner", async () => {
+      const hostId = uuid();
+      const code = await createRoom(port, hostId);
+      const a = track(await join(port, { code, name: "甲", clientId: hostId }));
+      const asnap = await a.wait("snapshot");
+
+      a.send({ type: "mode", cmd: "start", mode: "turf", seconds: 5 });
+      const started = await a.wait("mode");
+      assert(started.state.endsAt > Date.now(), "带着截止时刻，客户端自己倒数");
+
+      const one = paint(a, asnap.you.color, 200, 800, 300);
+      await a.wait((m) => m.type === "stroke_end" && m.id === one);
+
+      // 到点自己收，不用谁来点一下
+      const over = await a.wait((m) => m.type === "chat" && m.message.text.includes("涂地战结束"), 9000);
+      assert(over.message.text.includes("甲"), "报了名次，got " + over.message.text);
+      const off = await a.wait((m) => m.type === "mode" && m.state === null, 3000);
+      assert(off, "玩法摘掉了，墙回到平常的样子");
+
+      // 涂过的画留在墙上
+      const c = track(await join(port, { code, name: "丙", clientId: uuid() }));
+      const csnap = await c.wait("snapshot");
+      assert(csnap.mode === null && csnap.strokes.some((s) => s.id === one), "画还在，玩法没了");
+    });
+
     await test("the plain wall is the default, the game is only ever on top of it", async () => {
       const hostId = uuid();
       const code = await createRoom(port, hostId);

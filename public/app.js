@@ -1332,6 +1332,39 @@ function myInkHidden(s) {
   return !!(state.you && s.userId === state.you.id);
 }
 
+// 限时的玩法只发一个截止时刻，客户端自己倒数——
+// 每秒广播一次纯粹是浪费，而且四个人一起倒数还会不同步。
+let countdownTimer = 0;
+
+function modeLine(m) {
+  if (!m) return "";
+  const text = m.label || m.name || "";
+  if (!m.endsAt) return text;
+  const left = Math.max(0, m.endsAt - Date.now());
+  const s = Math.ceil(left / 1000);
+  const clock = `${Math.floor(s / 60)}:${String(s % 60).padStart(2, "0")}`;
+  return text ? `${clock} · ${text}` : clock;
+}
+
+function armCountdown() {
+  const m = modeNow();
+  if (!m || !m.endsAt) {
+    if (countdownTimer) clearInterval(countdownTimer);
+    countdownTimer = 0;
+    return;
+  }
+  if (countdownTimer) return;
+  countdownTimer = setInterval(() => {
+    const now = modeNow();
+    if (!now || !now.endsAt) {
+      clearInterval(countdownTimer);
+      countdownTimer = 0;
+      return;
+    }
+    els.modeText.textContent = modeLine(now);
+  }, 1000);
+}
+
 function renderModeBar() {
   const m = modeNow();
   const bar = els.modeBar;
@@ -1346,7 +1379,8 @@ function renderModeBar() {
   }
   bar.hidden = false;
   bar.className = m.tone ? `tone-${m.tone}` : "";
-  els.modeText.textContent = m.label || m.name || "";
+  els.modeText.textContent = modeLine(m);
+  armCountdown();
 
   if (m.action && m.action.cmd) {
     els.modeAct.hidden = false;
