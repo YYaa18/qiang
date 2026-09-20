@@ -1,0 +1,195 @@
+# 架构与性能设计
+
+配套文档：[MODES.md](MODES.md) —— 这份文档要支撑的玩法。
+
+---
+
+## 现状
+
+| 文件 | 行数 | 形态 |
+|---|---|---|
+| `server.js` | 1459 | 常量 → `Room` 类 → 约 60 个平铺函数 → 一个 switch → http |
+| `public/app.js` | 2908 | 常量 → `els` → `state` → 渲染 → 输入 → 聊天 → 网络 → 门厅 |
+
+现在还读得动。但**玩法的本质是"在每个动作前后插一道判断"**，平铺结构应对它的唯一办法是往二十个 handler 里各塞几个 `if (room.mode)`。第一个玩法能塞进去，第二个就开始互相打架，第三个就没人敢动了。
+
+所以：先改结构，再写玩法。而且要守住现在的三个优点——**不引入构建步骤、不引入框架、不引入数据库**。
+
+---
+
+## 一、先修四处性能问题
+
+这四处和玩法无关，都是现在就存在的，越早修越好。
+
+### 1. `broadcast` 重复序列化　🟡 便宜的白捡
+
+```js
+function broadcast(room, obj, exceptId) {
+  for (const u of room.users.values()) {
+    if (exceptId && u.id === exceptId) continue;
+    send(u.ws, obj);          // ← send 里各做一次 JSON.stringify
+  }
+}
+```
+
+同一个对象被序列化 N 次。4 人画线高峰期，三分之二是白做的。
+
+**改**：`broadcast` 先 `JSON.stringify` 一次，把字符串发给所有人。改动不到十行。
+
+### 2. 房间只进不出　🔴 公网服务器迟早出事
+
+`loadRooms()` 在启动时把 `data/rooms` 下的**每一个**房间读进内存，`rooms` Map 此后从不驱逐。一台长期在线的公网服务器，房间数只会单调增长，直到把内存吃完。
+
+**改**：
+- 启动时只扫文件名建立码表，不读内容；
+- 首次 `join` 时才真正读盘；
+- 最后一人离开、存盘完成后 N 分钟（比如 10 分钟），从内存移除。
+
+`clearTimer` 这类挂在房间上的定时器要跟着一起清，别让被驱逐的房间被 timer 拽回来。
+
+### 3. `readArchive` 是同步全量读　🔴 定时炸弹
+
+```js
+raw = fs.readFileSync(archiveFile(room), "utf8");   // 整个文件一次读完
+for (const line of raw.split("\n")) { ... }
+```
+
+`deploy/README.md` 里自己写着"`archive.jsonl` 会一直增长……大约每晚增加几 MB"。一年后它是 GB 级的，而这是**同步**读——一次"撤销一笔已冻结的笔"会把整个进程卡住几秒，**所有房间一起卡**。
+
+**改**：
+- 按段分文件：`archive-<seg>.jsonl`。重画哪一段只读哪一段，数据量降一到两个数量级；
+- 读取改成流式异步（`readline` over `createReadStream`），不再一次性 split 出几百万个字符串。
+
+### 4. 没有背压保护　🟡 弱网会涨内存
+
+`send()` 只检查 `readyState`，不看 `bufferedAmount`。手机弱网时发送缓冲区会无限增长。
+
+**改**：给 `cursor`、`stroke_point` 这类**丢了也没关系**的消息加一句判断，缓冲超过阈值（比如 256KB）就直接丢弃。`stroke_start` / `stroke_end` / `chat` 这类必达消息不参与丢弃。
+
+### 5. 顺带
+
+- **cursor 没有合并**：服务端收到即转发，4 人 × 20Hz ≈ 80 条/秒的纯装饰流量。改成服务端按 ~20Hz 把所有人的光标合成一条 `cursors` 群发，消息数降一个量级。
+- **烘焙失败会 1 秒无限重试**：`abortJob` 里 `setTimeout(maybeBake, 1000)` 没有退避、没有放弃计数。如果房里唯一的客户端是一台烘不动的手机，就是一个永久的每秒重试循环。加指数退避 + 连续失败 N 次后搁置。
+- **手机独自烘焙**：`pickBaker` 优先选房主，否则选第一个在线的人。手机单独在房里时由手机烘 2 倍分辨率 PNG，可能明显卡顿。至少加一个"能力上报"，让手机排在最后。
+
+客户端这边目前没有明显问题：点已经是 8 个一批发送，`rebuildInk` 有 `LIVE_KEEP` 封顶，分段虚拟化也在。导出 32000px 在手机上仍可能崩，但那是另一件事。
+
+---
+
+## 二、服务端拆分
+
+纯搬运，不改逻辑，20 个 e2e 测试兜底。
+
+```
+server.js              只剩接线：http / ws / 启动 / 优雅退出      ~150 行
+src/
+  room.js              Room 类、serialize / restore
+  store.js             存盘、惰性加载、驱逐
+  protocol.js          校验与归一化（validCode / asPoint / normalizeHex …）
+  net.js               send / broadcast / 预序列化 / 背压
+  bake.js              冻结、任务、存档
+  wall/
+    draw.js            stroke_* / text_place / undo / redo
+    presence.js        join / leave / kick / lock / extend / clear / rename
+    chat.js            chat / cursor
+  modes/
+    index.js           注册表
+    relay.js           接龙 / 补全
+```
+
+---
+
+## 三、规则层：两个钩子，不是二十个 if
+
+核心只需要两个插入点。
+
+```js
+// 每个会改变墙的动作，进来先过一道闸
+function gate(room, user, action, msg) {
+  const mode = modes.get(room.mode?.id);
+  if (!mode?.can) return null;                 // 没开玩法 = 全放行
+  return mode.can(room, user, action, msg);    // null 放行；字符串 = 拒绝理由
+}
+
+// 动作成功之后，玩法有机会推进自己的状态
+function after(room, event, ctx) {
+  modes.get(room.mode?.id)?.on?.(room, event, ctx);
+}
+```
+
+一个玩法就是一个对象：
+
+```js
+// src/modes/relay.js —— 接龙 / 补全
+module.exports = {
+  id: "relay",
+  minUsers: 1,                       // 异步也能玩
+  init(room, opts) { /* 划分段、设初始持棒人 */ },
+
+  can(room, user, action) {
+    if (action !== "draw") return null;
+    if (room.mode.holder && room.mode.holder !== user.id) return "现在轮到别人画";
+    return null;
+  },
+
+  // 可见性过滤：纯函数，服务端在发 snapshot 和广播时过一遍
+  visible(room, user, stroke) {
+    return inOwnSegment(room, user, stroke) || inPeekZone(room, stroke);
+  },
+
+  on(room, ev, ctx) {
+    if (ev.type === "stroke_end") ctx.bumpQuota(...);
+    if (ev.type === "handoff")    ctx.setDeadline(...);
+  },
+};
+```
+
+三条铁律：
+
+1. **可见性必须在服务端执行。** 不发给你的笔画，客户端才真的拿不到。藏在前端等于没藏——F12 一开就看见了。这对"盖住交接"和"卧底的词"都是硬要求。
+2. **轮次是接力棒，不是环。**
+   ```js
+   room.mode.holder   = userId | null   // 棒在谁手里；null = 棒放在墙上等人来拿
+   room.mode.queue    = [userId, ...]   // 意向顺序，不在线的自动跳过
+   room.mode.deadline = ts | null       // 到点自动传棒
+   ```
+   固定 N 人的环，在两人局里掉一个人就死锁了。接力棒让 2 人来回、4 人接力、1 人留棒给明天变成同一套状态。
+3. **所有定时器只存 deadline，不存句柄。** 进程重启后照 `restoreClearTimer` 的做法重建。玩法状态跟着 `serialize(room)` 一起落盘——加一个 `mode` 字段即可，不需要新的存储。
+
+倒计时**不要每秒广播**。发 deadline，客户端自己倒数（`clear` 已经是这么做的，照抄）。
+
+---
+
+## 四、客户端拆分
+
+改成浏览器原生 ES modules（`<script type="module">`），不需要打包器：
+
+```
+public/
+  app.js                 只负责启动和接线
+  core/   state.js  net.js  view.js
+  draw/   render.js  brush.js  input.js  shape.js
+  ui/     toolbar.js  chat.js  roster.js  lobby.js  palette.js
+  modes/  relay.js  ...
+```
+
+玩法代码只能通过两个口子接触主程序：
+
+- **读**：`state` 的只读快照
+- **写**：一个 `#mode-layer` 覆盖层 + 一个事件总线
+
+绝不允许玩法代码直接去改工具栏 DOM。否则装上第二个玩法的那天，它们就会互相拆台。
+
+代价是多几个 HTTP 请求。真嫌慢，最后加一个二十行的 concat 脚本就行——那仍然不是"构建系统"。
+
+---
+
+## 五、顺序
+
+1. 四处性能修复（1–4）——和玩法无关，独立可验证，先落地
+2. 服务端拆分——纯搬运，测试兜底
+3. 规则层两个钩子——此时还没有任何玩法，`gate` 永远返回 null，行为完全不变
+4. 写第一个玩法 `relay.js`
+5. 客户端拆分——可以推迟到第二个玩法出现时再做
+
+每一步都能单独提交、单独部署、单独回滚。
