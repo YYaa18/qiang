@@ -49,6 +49,8 @@
             <button type="button" id="menu-copy" class="mobile-only">复制链接</button>
             <button type="button" id="menu-export">导出 PNG</button>
             <button type="button" id="menu-rename">改名字</button>
+            <button type="button" id="menu-relay" class="host-only" hidden>开始接龙</button>
+            <button type="button" id="menu-reveal" class="host-only" hidden>揭晓</button>
             <button type="button" id="menu-lock" class="host-only" hidden>锁定画布</button>
             <button type="button" id="menu-clear" class="host-only danger" hidden>清空这面墙</button>
             <p id="kick-hint" class="host-only menu-hint" hidden>把鼠标移到顶栏的名字上，可以请朋友离开</p>
@@ -94,8 +96,18 @@
       </aside>
 
       <main id="desk">
+        <div id="relay-bar" hidden>
+          <span id="relay-dot" aria-hidden="true"></span>
+          <span id="relay-text"></span>
+          <button type="button" id="relay-act" hidden></button>
+        </div>
         <div id="paper-wrap">
           <div id="tiles"></div>
+          <div id="relay-mask" hidden aria-hidden="true">
+            <div class="mask-part" id="mask-left"></div>
+            <div class="mask-part" id="mask-right"></div>
+            <div id="mask-seam"></div>
+          </div>
           <button type="button" id="btn-extend" title="把墙接长一段" hidden><span class="plus">＋</span><span>接一段</span></button>
           <div id="cursors"></div>
           <input id="text-box" maxlength="80" hidden aria-label="写在墙上的字" />

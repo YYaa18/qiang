@@ -88,6 +88,16 @@ const els = {
   menuBtn: $("btn-menu"),
   menu: $("menu"),
   menuExport: $("menu-export"),
+  menuRelay: $("menu-relay"),
+  menuReveal: $("menu-reveal"),
+  relayBar: $("relay-bar"),
+  relayDot: $("relay-dot"),
+  relayText: $("relay-text"),
+  relayAct: $("relay-act"),
+  relayMask: $("relay-mask"),
+  maskLeft: $("mask-left"),
+  maskRight: $("mask-right"),
+  maskSeam: $("mask-seam"),
   menuLock: $("menu-lock"),
   menuClear: $("menu-clear"),
   menuRename: $("menu-rename"),
@@ -180,6 +190,7 @@ const state = {
   cursorTimer: 0,
   lastCursor: 0,
   othersCursors: new Map(),
+  mode: null, // 正在玩的玩法（服务端发来的那份，只读）
   clearDeadline: null,
   clearTick: null,
   replaced: false,
@@ -773,6 +784,13 @@ function updateDrawingHint() {
     const u = state.users.find((x) => x.id === id);
     if (u) names.push(u.name);
   }
+  if (relayBlocks()) {
+    const r = relay();
+    els.drawingHint.textContent = r.holder
+      ? `${r.holderName || "别人"}正在画这一段`
+      : "笔放在墙上，接过来才能画";
+    return;
+  }
   els.drawingHint.textContent = names.length ? `${names.join("、")}落笔中` : "";
 }
 
@@ -884,7 +902,9 @@ function glideToEnd() {
 }
 
 function updateExtendUi() {
-  const blocked = state.locked && !(state.you && state.you.isHost);
+  const r = relay();
+  const blocked =
+    (state.locked && !(state.you && state.you.isHost)) || !!(r && !r.revealed);
   els.extend.hidden = state.segments >= MAX_SEGMENTS || blocked;
   els.extend.style.left = `${wallW() + EXTEND_GAP}px`;
 }
@@ -920,6 +940,7 @@ function currentWidth() {
 function canDraw() {
   if (!state.you) return false;
   if (state.locked && !state.you.isHost) return false;
+  if (relayBlocks()) return false; // 没拿着笔就别费劲画了，服务端也不会收
   return !!(state.ws && state.ws.readyState === WebSocket.OPEN);
 }
 
@@ -1247,6 +1268,7 @@ function applySnapshot(snap) {
   state.strokes = snap.strokes || [];
   state.chat = snap.chat || [];
   state.locked = !!snap.locked;
+  state.mode = snap.mode || null;
   state.you = snap.you;
   state.canUndo = !!(snap.you && snap.you.canUndo);
   state.canRedo = !!(snap.you && snap.you.canRedo);
@@ -1270,11 +1292,115 @@ function applySnapshot(snap) {
   renderTools();
   updateLockUi();
   updateStacks();
+  renderRelay();
   rememberRoom();
   if (snap.clearDeadline && snap.clearDeadline > Date.now()) {
     startClearUi(snap.clearDeadline);
   } else {
     stopClearUi();
+  }
+}
+
+// ───────────── 接龙 ─────────────
+//
+// 客户端这边只负责「看起来对」：谁拿着笔、我能画在哪。
+// 真正的遮挡在服务端——藏起来的笔画根本没发到这台机器上，F12 也翻不出来。
+
+function relay() {
+  return state.mode && state.mode.id === "relay" ? state.mode : null;
+}
+
+// 我此刻能不能落笔（除了锁定之类的常规条件之外）
+function relayBlocks() {
+  const r = relay();
+  if (!r || r.revealed) return false;
+  return !(state.you && r.holder === state.you.id);
+}
+
+function renderRelay() {
+  const r = relay();
+  const host = !!(state.you && state.you.isHost);
+  els.menuRelay.textContent = r ? "结束接龙" : "开始接龙";
+  els.menuReveal.hidden = !host || !r || r.revealed;
+
+  if (!r) {
+    els.relayBar.hidden = true;
+    els.relayMask.hidden = true;
+    return;
+  }
+  els.relayBar.hidden = false;
+
+  const mine = !!(state.you && r.holder === state.you.id);
+  const free = !r.holder;
+  els.relayBar.classList.toggle("free", free && !r.revealed);
+
+  if (r.revealed) {
+    els.relayText.textContent = `接龙揭晓了 · 一共 ${r.legCount} 段`;
+    els.relayAct.hidden = true;
+  } else if (mine) {
+    els.relayText.textContent = "轮到你画这一段";
+    els.relayAct.hidden = false;
+    els.relayAct.textContent = "画完了，交出去";
+  } else if (free) {
+    els.relayText.textContent = "笔放在墙上，没人拿着";
+    els.relayAct.hidden = false;
+    els.relayAct.textContent = "我来接";
+  } else {
+    els.relayText.textContent = `${r.holderName || "别人"}正在画`;
+    els.relayAct.hidden = true;
+  }
+
+  renderMask();
+}
+
+// 把不属于我的那几段盖上。盖的是眼睛，不是数据。
+function renderMask() {
+  const r = relay();
+  if (!r || r.revealed || !r.myLeg) {
+    els.relayMask.hidden = true;
+    return;
+  }
+  els.relayMask.hidden = false;
+  const { x0, x1 } = r.myLeg;
+  const wall = wallW();
+  els.maskLeft.style.left = "0px";
+  els.maskLeft.style.width = `${Math.max(0, x0)}px`;
+  els.maskLeft.hidden = x0 <= 0;
+  els.maskRight.style.left = `${x1}px`;
+  els.maskRight.style.width = `${Math.max(0, wall - x1)}px`;
+  els.maskRight.hidden = x1 >= wall;
+
+  if (r.peekZone) {
+    els.maskSeam.hidden = false;
+    els.maskSeam.style.left = `${r.peekZone[0]}px`;
+    els.maskSeam.style.width = `${Math.max(1, r.peekZone[1] - r.peekZone[0])}px`;
+  } else {
+    els.maskSeam.hidden = true;
+  }
+}
+
+// 接过笔、或轮到自己时，把镜头带到自己那一段
+function lookAtMyLeg() {
+  const r = relay();
+  if (!r || !r.myLeg) return;
+  const view = els.desk.clientWidth / state.scale;
+  const mid = (r.myLeg.x0 + r.myLeg.x1) / 2;
+  state.panX = (mid - view / 2) * state.scale;
+  clampPan();
+  applyView();
+}
+
+function relayCmd(cmd, extra) {
+  send({ type: "mode", cmd, ...(extra || {}) });
+}
+
+function onRelayAct() {
+  const r = relay();
+  if (!r) return;
+  if (state.you && r.holder === state.you.id) {
+    relayCmd("pass");
+  } else if (!r.holder) {
+    relayCmd("take");
   }
 }
 
@@ -1846,6 +1972,7 @@ function onMessage(msg) {
       const added = [];
       for (let i = before; i < state.segments; i++) added.push(i);
       rebuildInk(added);
+      renderMask(); // 墙长了，右边那块遮挡要跟着铺过去
       if (state.you && msg.userId === state.you.id) glideToEnd();
       else applyView();
       break;
@@ -1877,6 +2004,18 @@ function onMessage(msg) {
       if (typeof msg.canRedo === "boolean") state.canRedo = msg.canRedo;
       updateStacks();
       break;
+    case "mode": {
+      const before = relay();
+      const wasMine = !!(before && state.you && before.holder === state.you.id);
+      state.mode = msg.state || null;
+      renderRelay();
+      updateExtendUi();
+      updateDrawingHint();
+      const now = relay();
+      const mineNow = !!(now && state.you && now.holder === state.you.id);
+      if (mineNow && !wasMine) lookAtMyLeg(); // 刚接过笔，把镜头带过去
+      break;
+    }
     case "cursors":
       // 服务端把所有人的光标攒成一条发过来，自己那份由 showCursor 跳过
       for (const c of msg.list || []) showCursor(c);
@@ -2779,6 +2918,19 @@ function bindUi() {
     els.menu.hidden = true;
     send({ type: "clear_start" });
   });
+  els.menuRelay.addEventListener("click", () => {
+    els.menu.hidden = true;
+    if (relay()) {
+      if (confirm("结束接龙？整面墙会揭晓给所有人。")) relayCmd("stop");
+    } else {
+      relayCmd("start", { mode: "relay" });
+    }
+  });
+  els.menuReveal.addEventListener("click", () => {
+    els.menu.hidden = true;
+    if (confirm("现在揭晓？所有人都会看到整条卷轴。")) relayCmd("reveal");
+  });
+  els.relayAct.addEventListener("click", onRelayAct);
   els.menuRename.addEventListener("click", () => {
     els.menu.hidden = true;
     const n = prompt("怎么称呼你", state.name || "");

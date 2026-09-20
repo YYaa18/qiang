@@ -1058,3 +1058,107 @@ button:disabled { opacity: 0.4; cursor: default; }
   }
   #bottombar { height: 24px; }
 }
+
+/* ───────────── 接龙 ───────────── */
+
+/* 顶上那条说明现在轮到谁的横幅 */
+#relay-bar {
+  position: absolute;
+  top: 10px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 6;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  /* left:50% 会让绝对定位元素的可用宽度只剩一半（transform 只管视觉不管布局），
+     不给 max-content 的话，窄屏上这行字会被挤成「轮到…」 */
+  width: max-content;
+  max-width: calc(100% - 24px);
+  padding: 7px 10px 7px 12px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: var(--panel);
+  box-shadow: 0 2px 10px rgba(0, 0, 0, 0.09);
+  font-size: 13px;
+  color: var(--ink);
+}
+#relay-bar[hidden] { display: none; }
+
+#relay-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--me);
+  flex: none;
+}
+/* 笔不在任何人手里的时候，让它轻轻眨一下，好让人知道可以接 */
+#relay-bar.free #relay-dot {
+  background: var(--muted);
+  animation: relay-pulse 1.6s ease-in-out infinite;
+}
+@keyframes relay-pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.25; }
+}
+
+#relay-text {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+#relay-act {
+  flex: none;
+  padding: 4px 12px;
+  border: 0;
+  border-radius: 999px;
+  background: var(--ink);
+  color: var(--paper);
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+}
+#relay-act:hover { opacity: 0.85; }
+#relay-act[hidden] { display: none; }
+
+/* 盖住不属于我的那部分卷轴。盖的只是眼睛看得见的部分——
+   真正的遮挡在服务端，那些笔画根本没发到这台机器上。 */
+#relay-mask {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  z-index: 3;
+}
+#relay-mask[hidden] { display: none; }
+
+.mask-part {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  background: repeating-linear-gradient(
+    -45deg,
+    rgba(120, 120, 120, 0.13) 0 8px,
+    rgba(120, 120, 120, 0.05) 8px 16px
+  );
+  border-left: 1px solid rgba(120, 120, 120, 0.28);
+  border-right: 1px solid rgba(120, 120, 120, 0.28);
+}
+
+/* 上一段露出来的那条窄缝，给它一点提示色 */
+#mask-seam {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  background: linear-gradient(90deg, rgba(230, 119, 0, 0) 0%, rgba(230, 119, 0, 0.08) 100%);
+  border-right: 1px dashed rgba(230, 119, 0, 0.5);
+}
+
+@media (max-width: 760px), (max-height: 520px) {
+  #relay-bar {
+    top: 6px;
+    font-size: 12px;
+    padding: 5px 8px 5px 10px;
+    gap: 7px;
+  }
+}
