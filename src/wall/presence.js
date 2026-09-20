@@ -20,6 +20,22 @@ function bindSocket(ws, room, user) {
   ws.clientId = user.id;
 }
 
+// 进墙时拿到的整墙。玩法可以藏起一部分笔画，也可以往里塞自己的状态——
+// 遮挡在这里生效，客户端拿不到就是真的没有。
+function snapshotFor(room, user) {
+  const snap = snapshotMsg(room, user);
+  snap.strokes = modes.visibleStrokes(room, user, snap.strokes);
+  snap.mode = modes.publicState(room, user);
+  return snap;
+}
+
+// 让屋里每个人重新拿一份整墙。揭晓的时候用：之前藏着的笔画到这一刻才发得出去。
+function resend(room) {
+  for (const u of room.users.values()) {
+    if (u.ws) send(u.ws, snapshotFor(room, u));
+  }
+}
+
 function handleJoin(ws, msg) {
   const code = normalizeCode(msg.code);
   const clientId = msg.clientId;
@@ -55,7 +71,7 @@ function handleJoin(ws, msg) {
     existing.replaced = false;
     existing.weak = !!msg.weak; // 同一个人可能换了台机器回来
     bindSocket(ws, room, existing);
-    send(ws, snapshotMsg(room, existing));
+    send(ws, snapshotFor(room, existing));
     broadcast(room, { type: "presence", users: publicUsers(room) }, existing.id);
     retryBake(room);
     modes.after(room, { type: "join", userId: existing.id, rejoin: true });
@@ -81,7 +97,7 @@ function handleJoin(ws, msg) {
   };
   room.users.set(clientId, user);
   bindSocket(ws, room, user);
-  send(ws, snapshotMsg(room, user));
+  send(ws, snapshotFor(room, user));
   pushSystem(room, `${name}来了`);
   broadcast(room, { type: "presence", users: publicUsers(room) });
   scheduleSave(room);
@@ -210,6 +226,7 @@ function handleExtend(ws) {
 }
 
 module.exports = {
+  resend,
   handleJoin,
   handleClose,
   handleLeave,

@@ -885,6 +885,144 @@ async function main() {
       assert(fallback.mode, "the phone takes over once it is the only one left");
     });
 
+    await test("relay: only the one holding the baton may draw", async () => {
+      const hostId = uuid();
+      const code = await createRoom(port, hostId);
+      const a = track(await join(port, { code, name: "甲", clientId: hostId }));
+      const asnap = await a.wait("snapshot");
+      const b = track(await join(port, { code, name: "乙", clientId: uuid() }));
+      const bsnap = await b.wait("snapshot");
+      assert(asnap.mode === null, "普通的墙没有玩法");
+
+      a.send({ type: "mode", cmd: "start", mode: "relay" });
+      const am = await a.wait("mode");
+      const bm = await b.wait("mode");
+      assert(am.state.id === "relay" && am.state.holder === hostId, "房主先拿着笔");
+      assert(am.state.myLeg && am.state.myLeg.x0 === 0, "甲这一段从头开始");
+      assert(bm.state.myLeg === null, "乙没有自己的段");
+
+      // 乙不是持棒的人，画不了
+      b.send({
+        type: "stroke_start",
+        id: uuid(),
+        strokeType: "pen",
+        color: bsnap.you.color,
+        width: 8,
+        x: 100,
+        y: 100,
+      });
+      const err = await b.wait("error");
+      assert(err.code === "not_allowed", "被闸门挡住了");
+      assert(err.message.includes("甲"), "而且说清了轮到谁，got " + err.message);
+    });
+
+    await test("relay: what one person draws, the others cannot see", async () => {
+      const hostId = uuid();
+      const code = await createRoom(port, hostId);
+      const a = track(await join(port, { code, name: "甲", clientId: hostId }));
+      const asnap = await a.wait("snapshot");
+      const b = track(await join(port, { code, name: "乙", clientId: uuid() }));
+      await b.wait("snapshot");
+      a.send({ type: "mode", cmd: "start", mode: "relay" });
+      await a.wait("mode");
+      await b.wait("mode");
+
+      // 甲在自己那一段画两笔：一笔在中间，一笔贴着右边缘（将来的窄缝里）
+      const middle = drawStrokes(a, asnap.you.color, 1, 300);
+      const atSeam = drawStrokes(a, asnap.you.color, 1, 1550);
+      await a.wait((m) => m.type === "stroke_end" && m.id === atSeam[0]);
+      await delay(150);
+
+      assert(!b.msgs.some((m) => m.type === "stroke_start"), "乙没收到任何起笔");
+      assert(!b.msgs.some((m) => m.type === "stroke_end"), "乙没收到任何落笔");
+      assert(!b.msgs.some((m) => m.type === "stroke_point"), "连点都没收到");
+
+      // 甲交棒，乙接过来
+      a.send({ type: "mode", cmd: "pass" });
+      await b.wait((m) => m.type === "mode" && m.state.holder === null);
+      b.send({ type: "mode", cmd: "take" });
+      const took = await b.wait((m) => m.type === "mode" && m.state.holder);
+      assert(took.state.myLeg.x0 === 1600, "乙接着甲那一段往右画");
+      assert(took.state.peekZone, "有一条窄缝可以接");
+
+      // 新来的丙拿到的整墙里，只该有窄缝里那一笔
+      const c = track(await join(port, { code, name: "丙", clientId: uuid() }));
+      const csnap = await c.wait("snapshot");
+      const ids = csnap.strokes.map((s) => s.id);
+      assert(!ids.includes(middle[0]), "段中间那一笔藏住了");
+      assert(ids.includes(atSeam[0]), "窄缝里那一笔露出来，好接上");
+      assert(csnap.strokes.length === 1, "整墙只发了该发的那一笔，got " + csnap.strokes.length);
+    });
+
+    await test("relay: revealing hands everyone the whole scroll at last", async () => {
+      const hostId = uuid();
+      const code = await createRoom(port, hostId);
+      const a = track(await join(port, { code, name: "甲", clientId: hostId }));
+      const asnap = await a.wait("snapshot");
+      const b = track(await join(port, { code, name: "乙", clientId: uuid() }));
+      await b.wait("snapshot");
+      a.send({ type: "mode", cmd: "start", mode: "relay" });
+      await a.wait("mode");
+      await b.wait("mode");
+
+      const hidden = drawStrokes(a, asnap.you.color, 3, 200);
+      await a.wait((m) => m.type === "stroke_end" && m.id === hidden[2]);
+      await delay(150);
+      assert(!b.msgs.some((m) => m.type === "stroke_end"), "揭晓前乙什么也看不见");
+
+      a.send({ type: "mode", cmd: "reveal" });
+      const after = await b.wait("snapshot"); // 揭晓时每个人重拿一份整墙
+      const ids = after.strokes.map((s) => s.id);
+      for (const id of hidden) assert(ids.includes(id), "揭晓后全都看得见");
+      assert(after.mode.revealed === true, "状态里也写着揭晓了");
+
+      // 揭晓之后这面墙就是普通的墙，谁都能画
+      const mine = drawStrokes(b, "#3B5BDB", 1, 900);
+      const landed = await a.wait((m) => m.type === "stroke_end" && m.id === mine[0]);
+      assert(landed, "乙现在画得了，甲也看得见");
+    });
+
+    await test("relay: the baton goes back on the wall when its holder leaves", async () => {
+      const hostId = uuid();
+      const code = await createRoom(port, hostId);
+      const a = track(await join(port, { code, name: "甲", clientId: hostId }));
+      await a.wait("snapshot");
+      const b = track(await join(port, { code, name: "乙", clientId: uuid() }));
+      await b.wait("snapshot");
+      a.send({ type: "mode", cmd: "start", mode: "relay" });
+      await a.wait("mode");
+      await b.wait("mode");
+
+      a.send({ type: "leave" });
+      const back = await b.wait((m) => m.type === "mode" && m.state.holder === null);
+      assert(back, "笔回到了墙上，没有卡死在一个已经走了的人身上");
+
+      // 乙可以接过来继续——两人局掉一个人也不该死锁
+      b.send({ type: "mode", cmd: "take" });
+      const took = await b.wait((m) => m.type === "mode" && m.state.holder);
+      assert(took.state.myLeg, "乙接过了笔，有了自己的段");
+    });
+
+    await test("relay: an unfinished game survives the room leaving memory", async () => {
+      const hostId = uuid();
+      const code = await createRoom(port, hostId);
+      const a = track(await join(port, { code, name: "甲", clientId: hostId }));
+      await a.wait("snapshot");
+      a.send({ type: "mode", cmd: "start", mode: "relay" });
+      await a.wait("mode");
+      a.send({ type: "mode", cmd: "pass" }); // 棒放在墙上，等明天的人
+      await a.wait((m) => m.type === "mode" && m.state.holder === null);
+      a.send({ type: "leave" });
+      await delay(400); // 房间被请出内存
+
+      // 异步就是这个玩法的常态：一根棒在墙上放一整夜，第二天还得在
+      const back = track(await join(port, { code, name: "丁", clientId: uuid() }));
+      const snap = await back.wait("snapshot");
+      assert(snap.mode && snap.mode.id === "relay", "接龙还在");
+      assert(snap.mode.holder === null, "笔还在墙上等人拿");
+      assert(snap.mode.legCount === 2, "已经画过的段数还记得，got " + snap.mode.legCount);
+    });
+
     await test("the old single archive file is still readable", async () => {
       const hostId = uuid();
       const code = await createRoom(port, hostId);

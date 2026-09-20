@@ -20,7 +20,7 @@
 
 // 这一层在 wall/* 之上，所以不引用它们中的任何一个——wall 里的模块要引 modes。
 // 具体的玩法文件不受这条限制，它想用 pushSystem 就自己去 require。
-const { send, broadcast } = require("../net");
+const { send, sendData, broadcast } = require("../net");
 const { ctxOf, scheduleSave, onRoomLoaded } = require("../store");
 
 /** 会经过闸门的动作。加新动作时这里和调用处一起改，别让它们各说各话。 */
@@ -102,6 +102,116 @@ function after(room, event) {
   }
 }
 
+// ───────────── 钩子三：可见性 ─────────────
+//
+// 遮挡必须在服务端做。不发给你的笔画，客户端才是真的拿不到——藏在前端等于没藏。
+//
+// 这里和 gate 的容错方向**故意相反**：gate 出错放行（宁可多画一笔，不能卡死整面墙），
+// visible 出错则藏起来。一面暂时空白的墙还能救，泄出去的底牌救不回来。
+
+function hidesStrokes(room) {
+  const mode = of(room);
+  return !!(mode && typeof mode.visible === "function");
+}
+
+function canSee(room, user, stroke) {
+  const mode = of(room);
+  if (!mode || typeof mode.visible !== "function") return true;
+  try {
+    return mode.visible(room, user, stroke) !== false;
+  } catch (err) {
+    console.error("mode visible() failed", room.code, room.mode.id, err);
+    return false; // 藏起来
+  }
+}
+
+function visibleStrokes(room, user, strokes) {
+  if (!hidesStrokes(room)) return strokes;
+  return strokes.filter((s) => canSee(room, user, s));
+}
+
+// 一条和某一笔有关的消息。没有遮挡时就是原来的 broadcast。
+// 有遮挡时也只序列化一次——每个人收到的内容是一样的，不同的只是收不收得到。
+function broadcastStroke(room, obj, stroke, exceptId) {
+  if (!hidesStrokes(room)) {
+    broadcast(room, obj, exceptId);
+    return;
+  }
+  const data = JSON.stringify(obj);
+  for (const u of room.users.values()) {
+    if (exceptId && u.id === exceptId) continue;
+    if (!canSee(room, u, stroke)) continue;
+    sendData(u.ws, data, false);
+  }
+}
+
+// ───────────── 玩法自己的指令 ─────────────
+//
+// 所有玩法共用一种消息 `{type:"mode", cmd:"..."}`，这样加玩法不必动 dispatch。
+
+function command(ws, msg) {
+  const ctx = ctxOf(ws);
+  if (!ctx) return;
+  const { room, user } = ctx;
+  const cmd = String(msg.cmd || "");
+
+  // 开局是特例：这时候房间还没有玩法，得先从登记处按名字找
+  if (cmd === "start") {
+    if (user.id !== room.hostId) {
+      send(ws, { type: "error", code: "forbidden", message: "只有房主可以开始玩法" });
+      return;
+    }
+    const mode = registry.get(String(msg.mode || ""));
+    if (!mode) {
+      send(ws, { type: "error", code: "no_mode", message: "没有这个玩法" });
+      return;
+    }
+    if (room.mode) {
+      send(ws, { type: "error", code: "busy", message: "先结束正在玩的" });
+      return;
+    }
+    room.mode = { id: mode.id };
+    if (typeof mode.init === "function") mode.init(room, user, msg, apiFor(room));
+    scheduleSave(room);
+    return;
+  }
+
+  const mode = of(room);
+  if (!mode) return;
+
+  if (cmd === "stop") {
+    if (user.id !== room.hostId) {
+      send(ws, { type: "error", code: "forbidden", message: "只有房主可以结束玩法" });
+      return;
+    }
+    if (typeof mode.stop === "function") mode.stop(room, user, apiFor(room));
+    room.mode = null;
+    scheduleSave(room);
+    return;
+  }
+
+  if (typeof mode.command !== "function") return;
+  try {
+    mode.command(room, user, cmd, msg, apiFor(room));
+  } catch (err) {
+    console.error("mode command() failed", room.code, room.mode.id, err);
+  }
+}
+
+// 发给客户端的玩法状态。玩法自己决定给每个人看多少——
+// 别把底牌塞进去，这东西是直接发到浏览器里的。
+function publicState(room, user) {
+  const mode = of(room);
+  if (!mode) return null;
+  if (typeof mode.publicState !== "function") return { id: mode.id };
+  try {
+    return { id: mode.id, ...mode.publicState(room, user) };
+  } catch (err) {
+    console.error("mode publicState() failed", room.code, room.mode.id, err);
+    return { id: mode.id };
+  }
+}
+
 // 房间从盘上读起来时，让玩法把自己的定时器重建出来（和清空倒计时一个路子）
 onRoomLoaded((room) => {
   const mode = of(room);
@@ -113,4 +223,20 @@ onRoomLoaded((room) => {
   }
 });
 
-module.exports = { ACTIONS, register, get, list, of, gate, allow, after };
+module.exports = {
+  ACTIONS,
+  register,
+  get,
+  list,
+  of,
+  gate,
+  allow,
+  after,
+  command,
+  hidesStrokes,
+  canSee,
+  visibleStrokes,
+  broadcastStroke,
+  publicState,
+  apiFor,
+};

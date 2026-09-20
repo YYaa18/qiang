@@ -43,7 +43,7 @@ function commitStroke(room, id) {
   st.undo.push(s.id);
   if (st.undo.length > UNDO_MAX) st.undo.shift();
   st.redo = [];
-  broadcast(room, { type: "stroke_end", id: s.id, userId: s.userId, stroke: s });
+  modes.broadcastStroke(room, { type: "stroke_end", id: s.id, userId: s.userId, stroke: s }, s);
   maybeBake(room);
   const user = room.users.get(s.userId);
   if (user) {
@@ -95,7 +95,7 @@ function handleStrokeStart(ws, msg) {
   room.open.set(stroke.id, stroke);
   const st = ensureStack(room, user.id);
   st.redo = [];
-  broadcast(room, { type: "stroke_start", stroke });
+  modes.broadcastStroke(room, { type: "stroke_start", stroke }, stroke);
   send(ws, {
     type: "stacks",
     canUndo: st.undo.length > 0,
@@ -124,7 +124,7 @@ function handleStrokePoint(ws, msg) {
     }
   }
   if (pts.length) {
-    broadcast(room, { type: "stroke_point", id: s.id, userId: s.userId, points: pts });
+    modes.broadcastStroke(room, { type: "stroke_point", id: s.id, userId: s.userId, points: pts }, s);
   }
 }
 
@@ -154,7 +154,7 @@ function handleStrokeReplace(ws, msg) {
   s.points = pts;
   if (SHAPES.has(msg.shape)) s.shape = msg.shape;
   else delete s.shape; // 吸附后又继续画：恢复成手画的线
-  broadcast(room, { type: "stroke_replace", id: s.id, points: pts, shape: s.shape });
+  modes.broadcastStroke(room, { type: "stroke_replace", id: s.id, points: pts, shape: s.shape }, s);
 }
 
 function handleStrokeCancel(ws, msg) {
@@ -164,7 +164,7 @@ function handleStrokeCancel(ws, msg) {
   const s = room.open.get(msg.id);
   if (!s || s.userId !== user.id) return;
   room.open.delete(msg.id);
-  broadcast(room, { type: "stroke_cancel", id: msg.id });
+  modes.broadcastStroke(room, { type: "stroke_cancel", id: msg.id }, s);
 }
 
 function handleTextPlace(ws, msg) {
@@ -201,7 +201,7 @@ function handleTextPlace(ws, msg) {
   st.undo.push(stroke.id);
   if (st.undo.length > UNDO_MAX) st.undo.shift();
   st.redo = [];
-  broadcast(room, { type: "text_place", stroke });
+  modes.broadcastStroke(room, { type: "text_place", stroke }, stroke);
   maybeBake(room);
   send(ws, {
     type: "stacks",

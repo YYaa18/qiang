@@ -9,10 +9,11 @@ const presence = require("./wall/presence");
 const draw = require("./wall/draw");
 const chat = require("./wall/chat");
 const clear = require("./wall/clear");
+const modes = require("./modes");
 
 // 玩法在这里登记。放在这而不是 modes/index.js 里，是因为玩法文件可以引用 wall/*，
 // 而 wall/* 又引用 modes——让 index 去 require 它们就绕回来了。
-// require("./modes/relay");
+require("./modes/relay");
 
 const ROUTES = {
   join: (ws, msg) => presence.handleJoin(ws, msg),
@@ -37,6 +38,10 @@ const ROUTES = {
 
   clear_start: (ws) => clear.handleClearStart(ws),
   clear_cancel: (ws) => clear.handleClearCancel(ws),
+
+  // 所有玩法共用这一种消息：{type:"mode", cmd:"start"|"pass"|"take"|…}
+  // 以后再加玩法，这张表一个字都不用动。
+  mode: (ws, msg) => modes.command(ws, msg),
 };
 
 function handleMessage(ws, raw) {

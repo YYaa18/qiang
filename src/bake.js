@@ -24,6 +24,7 @@ const {
 } = require("./config");
 const { send, broadcast } = require("./net");
 const { rooms, saveRoomNow } = require("./store");
+const modes = require("./modes");
 
 function roomDir(room) {
   return path.join(DATA_DIR, room.code);
@@ -150,6 +151,9 @@ async function readSegArchive(room, seg) {
 
 function maybeBake(room) {
   if (room.job || room.loadingFull) return;
+  // 玩法正藏着笔画时绝不烘焙：墨迹图是一张谁都能取的 PNG，
+  // 烘进去就等于把藏起来的东西贴到了公开的地址上。
+  if (modes.hidesStrokes(room)) return;
   const baker = pickBaker(room);
   if (!baker) return;
   if (room.dirtyFull.size) {
