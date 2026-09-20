@@ -117,6 +117,7 @@ function loadRoom(code) {
   room.hiddenFrozen = new Set(raw.hiddenFrozen || []);
   room.frozenIndex = raw.frozenIndex || {};
   room.dirtyFull = new Set(raw.dirtyFull || []);
+  room.mode = raw.mode && typeof raw.mode.id === "string" ? raw.mode : null;
   rooms.set(room.code, room);
   for (const fn of loadHooks) fn(room);
   return room;

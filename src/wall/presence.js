@@ -13,6 +13,7 @@ const { normalizeCode, validCode, validUuid, cleanName } = require("../protocol"
 const { abortJob, retryBake } = require("../bake");
 const { finishOpenStrokes } = require("./draw");
 const { pushSystem } = require("./chat");
+const modes = require("../modes");
 
 function bindSocket(ws, room, user) {
   ws.roomCode = room.code;
@@ -57,6 +58,7 @@ function handleJoin(ws, msg) {
     send(ws, snapshotMsg(room, existing));
     broadcast(room, { type: "presence", users: publicUsers(room) }, existing.id);
     retryBake(room);
+    modes.after(room, { type: "join", userId: existing.id, rejoin: true });
     return;
   }
 
@@ -84,6 +86,7 @@ function handleJoin(ws, msg) {
   broadcast(room, { type: "presence", users: publicUsers(room) });
   scheduleSave(room);
   retryBake(room);
+  modes.after(room, { type: "join", userId: user.id, rejoin: false });
 }
 
 function handleClose(ws) {
@@ -106,6 +109,7 @@ function handleClose(ws) {
     pushSystem(room, `${user.name}走了`);
     broadcast(room, { type: "presence", users: publicUsers(room) });
     scheduleSave(room);
+    modes.after(room, { type: "leave", userId: user.id });
   }, GRACE_MS);
 }
 
@@ -122,6 +126,7 @@ function handleLeave(ws) {
   pushSystem(room, `${user.name}走了`);
   broadcast(room, { type: "presence", users: publicUsers(room) });
   scheduleSave(room);
+  modes.after(room, { type: "leave", userId: user.id });
   try {
     ws.close();
   } catch {
@@ -158,6 +163,7 @@ function handleKick(ws, msg) {
   broadcast(room, { type: "presence", users: publicUsers(room) });
   broadcast(room, { type: "kick", targetId });
   scheduleSave(room);
+  modes.after(room, { type: "leave", userId: targetId, kicked: true });
 }
 
 function handleRename(ws, msg) {
@@ -185,7 +191,7 @@ function handleLock(ws, locked) {
 }
 
 function handleExtend(ws) {
-  const ctx = ctxOf(ws);
+  const ctx = modes.allow(ws, "extend", null);
   if (!ctx) return;
   const { room, user } = ctx;
   if (room.locked && user.id !== room.hostId) {
@@ -200,6 +206,7 @@ function handleExtend(ws) {
   broadcast(room, { type: "extend", segments: room.segments, userId: user.id });
   pushSystem(room, `${user.name}把墙接长了一段`);
   scheduleSave(room);
+  modes.after(room, { type: "extend", segments: room.segments, userId: user.id });
 }
 
 module.exports = {

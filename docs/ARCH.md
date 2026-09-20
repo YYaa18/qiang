@@ -121,23 +121,26 @@ onRoomLoaded(restoreClearTimer);
 
 ---
 
-## 三、规则层：两个钩子，不是二十个 if
+## 三、规则层：两个钩子，不是二十个 if　✅ 已完成
 
 核心只需要两个插入点。
 
-```js
-// 每个会改变墙的动作，进来先过一道闸
-function gate(room, user, action, msg) {
-  const mode = modes.get(room.mode?.id);
-  if (!mode?.can) return null;                 // 没开玩法 = 全放行
-  return mode.can(room, user, action, msg);    // null 放行；字符串 = 拒绝理由
-}
+落地在 `src/modes/index.js`。handler 里原本第一行就是 `ctxOf(ws)`，现在换成 `modes.allow(ws, action, msg)`——把「认出是谁」和「玩法答不答应」合成同一次查询，所以**一行都没多**：
 
-// 动作成功之后，玩法有机会推进自己的状态
-function after(room, event, ctx) {
-  modes.get(room.mode?.id)?.on?.(room, event, ctx);
+```js
+function handleStrokeStart(ws, msg) {
+  const ctx = modes.allow(ws, "draw", msg);   // 从前是 ctxOf(ws)
+  if (!ctx) return;
+  ...
 }
 ```
+
+七个动作过闸门：`draw` `text` `undo` `redo` `chat` `extend` `clear`。
+（`stroke_point` / `stroke_end` **不**过闸门：一笔既然已经起了，就必须让它收得了尾，否则会留下一笔永远合不上的开口。）
+
+十二处 `modes.after(room, event)`：笔画落定、落字、撤销、重做、进出、踢人、接长、说话、清空。
+
+两条自保规则：**玩法的 `can()` 或 `on()` 抛异常时按放行处理**。宁可让人多画一笔，也不能因为玩法有 bug 把整面墙卡死。
 
 一个玩法就是一个对象：
 
@@ -176,7 +179,10 @@ module.exports = {
    room.mode.deadline = ts | null       // 到点自动传棒
    ```
    固定 N 人的环，在两人局里掉一个人就死锁了。接力棒让 2 人来回、4 人接力、1 人留棒给明天变成同一套状态。
-3. **所有定时器只存 deadline，不存句柄。** 进程重启后照 `restoreClearTimer` 的做法重建。玩法状态跟着 `serialize(room)` 一起落盘——加一个 `mode` 字段即可，不需要新的存储。
+3. **所有定时器只存 deadline，不存句柄。** ✅ 玩法的 `restore(room)` 挂在 `onRoomLoaded` 上，和清空倒计时同一个口子。玩法状态就是 `room.mode`，跟着 `serialize(room)` 一起落盘，没有新的存储。
+
+> 可见性（`visible`）这次**没做**。没有真玩法用它，写出来就是没被验证过的猜测。
+> 落地时要注意一件事：按人过滤和「一条消息只序列化一次」是冲突的——得让没声明 `visible` 的房间照走快路，只有开了遮挡的房间才按人分别序列化。
 
 倒计时**不要每秒广播**。发 deadline，客户端自己倒数（`clear` 已经是这么做的，照抄）。
 
@@ -211,8 +217,8 @@ public/
 1. ~~四处性能修复（1–4）~~ ✅ 已完成
 2. ~~第 5 节那几处顺带的（光标合并、烘焙退避、手机不当烘焙机）~~ ✅ 已完成
 3. ~~服务端拆分——纯搬运，测试兜底~~ ✅ 已完成
-4. 规则层两个钩子——此时还没有任何玩法，`gate` 永远返回 null，行为完全不变
-5. 写第一个玩法 `relay.js`
+4. ~~规则层两个钩子~~ ✅ 已完成（没有玩法时 `gate` 永远返回 null，25 项 e2e 一字未改全过）
+5. 写第一个玩法 `relay.js`——届时再把 `visible` 补上
 6. 客户端拆分——可以推迟到第二个玩法出现时再做
 
 每一步都能单独提交、单独部署、单独回滚。

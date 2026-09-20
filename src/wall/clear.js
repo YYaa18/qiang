@@ -11,11 +11,12 @@ const { send, broadcast } = require("../net");
 const { ctxOf, scheduleSave, onRoomLoaded } = require("../store");
 const { abortJob, roomDir } = require("../bake");
 const { pushSystem } = require("./chat");
+const modes = require("../modes");
 
 const CLEAR_DELAY_MS = 5000;
 
 function handleClearStart(ws) {
-  const ctx = ctxOf(ws);
+  const ctx = modes.allow(ws, "clear", null);
   if (!ctx) return;
   const { room, user } = ctx;
   if (user.id !== room.hostId) {
@@ -67,6 +68,7 @@ function finishClear(room) {
   broadcast(room, { type: "clear_done" });
   pushSystem(room, "墙被清空了");
   scheduleSave(room);
+  modes.after(room, { type: "clear" });
 }
 
 function restoreClearTimer(room) {

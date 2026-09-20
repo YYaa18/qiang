@@ -49,6 +49,8 @@ class Room {
     this.clearTimer = null;
     /** @type {Map<string, Stroke>} */
     this.open = new Map();
+    /** @type {{id: string}|null} 正在玩的玩法和它自己的状态；没开玩法就是 null */
+    this.mode = null;
   }
 }
 
@@ -161,6 +163,7 @@ function serialize(room) {
     colorByUser: room.colorByUser,
     stacks: room.stacks,
     clearDeadline: room.clearDeadline,
+    mode: room.mode,
   };
 }
 

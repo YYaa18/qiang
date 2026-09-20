@@ -8,6 +8,7 @@ const { CHAT_MAX, CURSOR_FLUSH_MS } = require("../config");
 const { broadcast } = require("../net");
 const { ctxOf, scheduleSave } = require("../store");
 const { asPoint } = require("../protocol");
+const modes = require("../modes");
 
 // 系统消息（来了、走了、被清空了）也走聊天，这样它们跟着房间一起存盘
 function pushSystem(room, text) {
@@ -26,7 +27,7 @@ function pushSystem(room, text) {
 }
 
 function handleChat(ws, msg) {
-  const ctx = ctxOf(ws);
+  const ctx = modes.allow(ws, "chat", msg);
   if (!ctx) return;
   const { room, user } = ctx;
   const text = String(msg.text || "").trim();
@@ -46,6 +47,7 @@ function handleChat(ws, msg) {
   }
   broadcast(room, { type: "chat", message });
   scheduleSave(room);
+  modes.after(room, { type: "chat", message, userId: user.id });
 }
 
 function handleCursor(ws, msg) {

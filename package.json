@@ -5,7 +5,7 @@
   "description": "墙 — 朋友共用画板",
   "scripts": {
     "start": "node server.js",
-    "test": "node test/e2e.js"
+    "test": "node test/modes.js && node test/e2e.js"
   },
   "engines": {
     "node": ">=18"

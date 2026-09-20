@@ -2,13 +2,17 @@
 
 // 客户端发来的每一条消息落到哪个处理函数。
 //
-// 以后加玩法时，规则层的闸门就装在这里：每个会改变墙的动作先过一道 can()，
-// 这样二十个 handler 里不必各塞一个 if。
+// 闸门本身装在各个 handler 的第一行（modes.allow 换掉了原来的 ctxOf），
+// 这样「认出是谁」和「玩法答不答应」是同一次查询，不会多出一层。
 
 const presence = require("./wall/presence");
 const draw = require("./wall/draw");
 const chat = require("./wall/chat");
 const clear = require("./wall/clear");
+
+// 玩法在这里登记。放在这而不是 modes/index.js 里，是因为玩法文件可以引用 wall/*，
+// 而 wall/* 又引用 modes——让 index 去 require 它们就绕回来了。
+// require("./modes/relay");
 
 const ROUTES = {
   join: (ws, msg) => presence.handleJoin(ws, msg),

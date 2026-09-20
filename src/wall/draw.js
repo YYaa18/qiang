@@ -19,6 +19,7 @@ const { ctxOf, scheduleSave } = require("../store");
 const { ensureStack } = require("../room");
 const { validStrokeId, normalizeHex, asPoint, withPressure } = require("../protocol");
 const { maybeBake, setFrozenHidden, touchJob } = require("../bake");
+const modes = require("../modes");
 
 function finishOpenStrokes(room, userId, onlyNonHost) {
   const ids = [];
@@ -53,11 +54,12 @@ function commitStroke(room, id) {
     });
   }
   scheduleSave(room);
+  modes.after(room, { type: "stroke_end", stroke: s, userId: s.userId });
   return s;
 }
 
 function handleStrokeStart(ws, msg) {
-  const ctx = ctxOf(ws);
+  const ctx = modes.allow(ws, "draw", msg);
   if (!ctx) return;
   const { room, user } = ctx;
   if (room.locked && user.id !== room.hostId) {
@@ -166,7 +168,7 @@ function handleStrokeCancel(ws, msg) {
 }
 
 function handleTextPlace(ws, msg) {
-  const ctx = ctxOf(ws);
+  const ctx = modes.allow(ws, "text", msg);
   if (!ctx) return;
   const { room, user } = ctx;
   if (room.locked && user.id !== room.hostId) {
@@ -207,10 +209,11 @@ function handleTextPlace(ws, msg) {
     canRedo: false,
   });
   scheduleSave(room);
+  modes.after(room, { type: "text", stroke, userId: user.id });
 }
 
 function handleUndo(ws) {
-  const ctx = ctxOf(ws);
+  const ctx = modes.allow(ws, "undo", null);
   if (!ctx) return;
   const { room, user } = ctx;
   if (room.locked && user.id !== room.hostId) {
@@ -234,10 +237,11 @@ function handleUndo(ws) {
   });
   scheduleSave(room);
   maybeBake(room);
+  modes.after(room, { type: "undo", id, userId: user.id });
 }
 
 function handleRedo(ws) {
-  const ctx = ctxOf(ws);
+  const ctx = modes.allow(ws, "redo", null);
   if (!ctx) return;
   const { room, user } = ctx;
   if (room.locked && user.id !== room.hostId) {
@@ -261,6 +265,7 @@ function handleRedo(ws) {
   });
   scheduleSave(room);
   maybeBake(room);
+  modes.after(room, { type: "redo", id, userId: user.id });
 }
 
 module.exports = {
