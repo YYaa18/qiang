@@ -26,6 +26,7 @@ function snapshotFor(room, user) {
   const snap = snapshotMsg(room, user);
   snap.strokes = modes.visibleStrokes(room, user, snap.strokes);
   snap.mode = modes.publicState(room, user);
+  snap.modes = modes.catalog(); // 菜单照着这个长出来
   return snap;
 }
 

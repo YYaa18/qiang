@@ -319,6 +319,8 @@ button:disabled { opacity: 0.4; cursor: default; }
   letter-spacing: 0.04em;
 }
 .menu-label[hidden] { display: none; }
+#mode-menu { display: contents; }
+#mode-menu[hidden] { display: none; }
 
 #workspace {
   flex: 1;
@@ -1076,10 +1078,10 @@ button:disabled { opacity: 0.4; cursor: default; }
   #bottombar { height: 24px; }
 }
 
-/* ───────────── 接龙 ───────────── */
+/* ───────────── 玩法的外壳 ───────────── */
 
 /* 顶上那条说明现在轮到谁的横幅 */
-#relay-bar {
+#mode-bar {
   position: absolute;
   top: 10px;
   left: 50%;
@@ -1100,32 +1102,33 @@ button:disabled { opacity: 0.4; cursor: default; }
   font-size: 13px;
   color: var(--ink);
 }
-#relay-bar[hidden] { display: none; }
+#mode-bar[hidden] { display: none; }
 
-#relay-dot {
+#mode-dot {
   width: 8px;
   height: 8px;
   border-radius: 50%;
   background: var(--me);
   flex: none;
 }
-/* 笔不在任何人手里的时候，让它轻轻眨一下，好让人知道可以接 */
-#relay-bar.free #relay-dot {
+/* 轮到别人时圆点安静下来；没人拿着笔时让它轻轻眨，好让人知道可以接 */
+#mode-bar.tone-wait #mode-dot { background: var(--muted); }
+#mode-bar.tone-free #mode-dot {
   background: var(--muted);
-  animation: relay-pulse 1.6s ease-in-out infinite;
+  animation: mode-pulse 1.6s ease-in-out infinite;
 }
-@keyframes relay-pulse {
+@keyframes mode-pulse {
   0%, 100% { opacity: 1; }
   50% { opacity: 0.25; }
 }
 
-#relay-text {
+#mode-text {
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
 }
 
-#relay-act {
+#mode-act {
   flex: none;
   padding: 4px 12px;
   border: 0;
@@ -1136,18 +1139,18 @@ button:disabled { opacity: 0.4; cursor: default; }
   font-size: 12px;
   cursor: pointer;
 }
-#relay-act:hover { opacity: 0.85; }
-#relay-act[hidden] { display: none; }
+#mode-act:hover { opacity: 0.85; }
+#mode-act[hidden] { display: none; }
 
 /* 盖住不属于我的那部分卷轴。盖的只是眼睛看得见的部分——
    真正的遮挡在服务端，那些笔画根本没发到这台机器上。 */
-#relay-mask {
+#mode-mask {
   position: absolute;
   inset: 0;
   pointer-events: none;
   z-index: 3;
 }
-#relay-mask[hidden] { display: none; }
+#mode-mask[hidden] { display: none; }
 
 .mask-part {
   position: absolute;
@@ -1172,7 +1175,7 @@ button:disabled { opacity: 0.4; cursor: default; }
 }
 
 @media (max-width: 760px), (max-height: 520px) {
-  #relay-bar {
+  #mode-bar {
     top: 6px;
     font-size: 12px;
     padding: 5px 8px 5px 10px;

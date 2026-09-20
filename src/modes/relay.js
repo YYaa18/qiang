@@ -16,7 +16,7 @@
 // （holder 为 null），谁来了谁接。固定的环在两人局里掉一个人就死锁了。
 
 const { SEG_W, MAX_SEGMENTS } = require("../config");
-const { send, broadcast } = require("../net");
+const { broadcast } = require("../net");
 const { pushSystem } = require("../wall/chat");
 const presence = require("../wall/presence");
 const { register } = require("./index");
@@ -80,32 +80,42 @@ function startLeg(room, userId) {
   return leg;
 }
 
-// 每个人看到的玩法状态不一样（我那一段在哪、窄缝在哪），所以一人一条
-function announce(room, api) {
-  for (const u of room.users.values()) {
-    if (u.ws) send(u.ws, { type: "mode", state: publicFor(room, u) });
-  }
-  api.save();
-}
-
+// 客户端不认识「接龙」，它只照着这份显示指令渲染
 function publicFor(room, user) {
   const m = room.mode;
   const leg = currentLeg(room);
-  const mine = leg && leg.userId === user.id;
+  const mine = !!(leg && leg.userId === user.id);
+  const free = !m.holder;
+  const host = room.hostId === user.id;
+
+  let label;
+  let tone;
+  let action = null;
+  if (mine) {
+    label = "轮到你画这一段";
+    tone = "you";
+    action = { cmd: "pass", label: "画完了，交出去" };
+  } else if (free) {
+    label = "笔放在墙上，没人拿着";
+    tone = "free";
+    action = { cmd: "take", label: "我来接" };
+  } else {
+    label = `${nameOf(room, m.holder)}正在画`;
+    tone = "wait";
+  }
+
   return {
-    id: "relay",
-    revealed: !!m.revealed,
-    holder: m.holder,
-    holderName: m.holder ? nameOf(room, m.holder) : null,
-    legCount: legs(room).length,
-    legW: m.legW,
-    peek: PEEK,
-    // 我这一段画在哪（不是我的棒次就没有）
-    myLeg: mine ? { x0: leg.x0, x1: leg.x1 } : null,
-    // 窄缝的位置，客户端据此画出遮挡
-    peekZone: m.revealed ? null : peekZone(room),
-    // 揭晓后整条卷轴都能看
-    wallEnd: legs(room).length ? legs(room)[legs(room).length - 1].x1 : m.legW,
+    label,
+    tone,
+    action,
+    legCount: legs(room).length, // 画到第几段了，不是秘密
+    blocked: !mine,
+    why: free ? "笔放在墙上，接过来才能画" : `${nameOf(room, m.holder)}正在画这一段`,
+    drawable: mine ? { x0: leg.x0, x1: leg.x1 } : null,
+    hint: mine ? peekZone(room) : null,
+    // 接龙期间墙由玩法自己接长，别让人手动点
+    noExtend: true,
+    hostActions: host ? [{ cmd: "reveal", label: "揭晓", confirm: "现在揭晓？所有人都会看到整条卷轴。" }] : [],
   };
 }
 
@@ -127,6 +137,8 @@ function nameOf(room, id) {
 
 module.exports = register({
   id: "relay",
+  name: "接龙",
+  hint: "一人画一段，看不见别人画了什么，最后一起揭晓",
 
   init(room, user, msg, api) {
     const legW = clampLeg(Number(msg.legW));
@@ -137,7 +149,7 @@ module.exports = register({
     startLeg(room, user.id);
     room.mode.holder = user.id;
     pushSystem(room, `接龙开始了，${user.name}先画第一段`);
-    announce(room, api);
+    api.announce();
   },
 
   // 中途结束也等于揭晓：不然那些藏起来的笔画谁也看不到了
@@ -196,7 +208,7 @@ module.exports = register({
       m.holder = null; // 棒放回墙上，谁来谁接
       startLeg(room, null);
       pushSystem(room, `${user.name}画完了一段，笔放在墙上了`);
-      announce(room, api);
+      api.announce();
       return;
     }
 
@@ -208,7 +220,7 @@ module.exports = register({
       leg.userId = user.id;
       m.holder = user.id;
       pushSystem(room, `${user.name}接过了笔`);
-      announce(room, api);
+      api.announce();
       return;
     }
 
@@ -230,13 +242,13 @@ module.exports = register({
     if (event.type === "leave" && m.holder === event.userId) {
       m.holder = null;
       pushSystem(room, "拿笔的人走了，笔放回了墙上");
-      announce(room, api);
+      api.announce();
       return;
     }
 
     // 有人进来时把玩法状态给他，否则他只看得见一面空墙却不知道为什么
     if (event.type === "join") {
-      announce(room, api);
+      api.announce();
     }
   },
 

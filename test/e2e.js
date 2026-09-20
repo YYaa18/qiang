@@ -897,9 +897,10 @@ async function main() {
       a.send({ type: "mode", cmd: "start", mode: "relay" });
       const am = await a.wait("mode");
       const bm = await b.wait("mode");
-      assert(am.state.id === "relay" && am.state.holder === hostId, "房主先拿着笔");
-      assert(am.state.myLeg && am.state.myLeg.x0 === 0, "甲这一段从头开始");
-      assert(bm.state.myLeg === null, "乙没有自己的段");
+      assert(am.state.id === "relay" && am.state.blocked === false, "房主先拿着笔");
+      assert(am.state.drawable && am.state.drawable.x0 === 0, "甲这一段从头开始");
+      assert(am.state.action.cmd === "pass", "甲能交棒");
+      assert(bm.state.blocked === true && bm.state.drawable === null, "乙没有自己的段");
 
       // 乙不是持棒的人，画不了
       b.send({
@@ -939,11 +940,11 @@ async function main() {
 
       // 甲交棒，乙接过来
       a.send({ type: "mode", cmd: "pass" });
-      await b.wait((m) => m.type === "mode" && m.state.holder === null);
+      await b.wait((m) => m.type === "mode" && m.state.action && m.state.action.cmd === "take");
       b.send({ type: "mode", cmd: "take" });
-      const took = await b.wait((m) => m.type === "mode" && m.state.holder);
-      assert(took.state.myLeg.x0 === 1600, "乙接着甲那一段往右画");
-      assert(took.state.peekZone, "有一条窄缝可以接");
+      const took = await b.wait((m) => m.type === "mode" && m.state.drawable);
+      assert(took.state.drawable.x0 === 1600, "乙接着甲那一段往右画");
+      assert(took.state.hint, "有一条窄缝可以接");
 
       // 新来的丙拿到的整墙里，只该有窄缝里那一笔
       const c = track(await join(port, { code, name: "丙", clientId: uuid() }));
@@ -996,13 +997,13 @@ async function main() {
       await b.wait("mode");
 
       a.send({ type: "leave" });
-      const back = await b.wait((m) => m.type === "mode" && m.state.holder === null);
+      const back = await b.wait((m) => m.type === "mode" && m.state.action && m.state.action.cmd === "take");
       assert(back, "笔回到了墙上，没有卡死在一个已经走了的人身上");
 
       // 乙可以接过来继续——两人局掉一个人也不该死锁
       b.send({ type: "mode", cmd: "take" });
-      const took = await b.wait((m) => m.type === "mode" && m.state.holder);
-      assert(took.state.myLeg, "乙接过了笔，有了自己的段");
+      const took = await b.wait((m) => m.type === "mode" && m.state.drawable);
+      assert(took.state.blocked === false, "乙接过了笔，画得了了");
     });
 
     await test("relay: an unfinished game survives the room leaving memory", async () => {
@@ -1013,7 +1014,7 @@ async function main() {
       a.send({ type: "mode", cmd: "start", mode: "relay" });
       await a.wait("mode");
       a.send({ type: "mode", cmd: "pass" }); // 棒放在墙上，等明天的人
-      await a.wait((m) => m.type === "mode" && m.state.holder === null);
+      await a.wait((m) => m.type === "mode" && m.state.action && m.state.action.cmd === "take");
       a.send({ type: "leave" });
       await delay(400); // 房间被请出内存
 
@@ -1021,8 +1022,59 @@ async function main() {
       const back = track(await join(port, { code, name: "丁", clientId: uuid() }));
       const snap = await back.wait("snapshot");
       assert(snap.mode && snap.mode.id === "relay", "接龙还在");
-      assert(snap.mode.holder === null, "笔还在墙上等人拿");
+      assert(snap.mode.action.cmd === "take", "笔还在墙上等人拿");
       assert(snap.mode.legCount === 2, "已经画过的段数还记得，got " + snap.mode.legCount);
+    });
+
+    await test("limit: ten strokes each, and then you just watch", async () => {
+      const hostId = uuid();
+      const code = await createRoom(port, hostId);
+      const a = track(await join(port, { code, name: "甲", clientId: hostId }));
+      const asnap = await a.wait("snapshot");
+      const b = track(await join(port, { code, name: "乙", clientId: uuid() }));
+      const bsnap = await b.wait("snapshot");
+
+      // 菜单是服务端的清单长出来的：加玩法不用动客户端
+      assert(asnap.modes.some((m) => m.id === "limit"), "清单里有限笔共作");
+      assert(asnap.modes.some((m) => m.id === "relay"), "清单里也还有接龙");
+
+      a.send({ type: "mode", cmd: "start", mode: "limit", quota: 3 });
+      const am = await a.wait("mode");
+      assert(am.state.label === "你还剩 3 笔", "开局就告诉你还剩几笔，got " + am.state.label);
+      assert(am.state.blocked === false && am.state.drawable === undefined, "限笔不限范围，随处可画");
+
+      // 三笔用完
+      drawStrokes(a, asnap.you.color, 3, 200);
+      const spent = await a.wait((m) => m.type === "mode" && m.state.left === 0);
+      assert(spent.state.label === "你的笔用完了", "用完了就说用完了");
+      assert(spent.state.blocked === true);
+
+      // 第四笔画不出去
+      a.send({
+        type: "stroke_start",
+        id: uuid(),
+        strokeType: "pen",
+        color: asnap.you.color,
+        width: 8,
+        x: 400,
+        y: 400,
+      });
+      const err = await a.wait("error");
+      assert(err.code === "not_allowed" && err.message.includes("3 笔"), "拒绝的话说清了额度，got " + err.message);
+
+      // 乙有自己的三笔，互不相干
+      const bm = b.msgs.filter((m) => m.type === "mode").pop();
+      assert(bm.state.left === 3, "乙的额度是自己的，got " + bm.state.left);
+      const mine = drawStrokes(b, bsnap.you.color, 1, 700);
+      await a.wait((m) => m.type === "stroke_end" && m.id === mine[0]);
+
+      // 反悔一笔就还你一笔：这是修正，不是作弊
+      a.send({ type: "undo" });
+      const refund = await a.wait((m) => m.type === "mode" && m.state.left === 1);
+      assert(refund, "撤销之后额度还回来了");
+      const again = drawStrokes(a, asnap.you.color, 1, 900);
+      const ok = await b.wait((m) => m.type === "stroke_end" && m.id === again[0]);
+      assert(ok, "还回来的那一笔真的能用");
     });
 
     await test("the plain wall is the default, the game is only ever on top of it", async () => {

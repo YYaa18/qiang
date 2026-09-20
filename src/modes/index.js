@@ -46,6 +46,16 @@ function list() {
   return [...registry.keys()];
 }
 
+// 玩法清单，发给客户端用来长出菜单。客户端不认识任何具体玩法，
+// 所以再加第几个玩法，菜单都不用动一行。
+function catalog() {
+  return [...registry.values()].map((m) => ({
+    id: m.id,
+    name: m.name || m.id,
+    hint: m.hint || "",
+  }));
+}
+
 /** 这间房此刻在玩什么；没开玩法、或玩法没注册过，都是 null */
 function of(room) {
   if (!room || !room.mode || typeof room.mode.id !== "string") return null;
@@ -88,6 +98,14 @@ function apiFor(room) {
   return {
     broadcast: (obj) => broadcast(room, obj),
     save: () => scheduleSave(room),
+    // 把最新状态告诉屋里每个人。每人看到的不一样（我能画哪一段、轮没轮到我），
+    // 所以一人一条；形状由 publicState 统一拼，玩法不必自己拼，也就不会拼漏。
+    announce: () => {
+      for (const u of room.users.values()) {
+        if (u.ws) send(u.ws, { type: "mode", state: publicState(room, u) });
+      }
+      scheduleSave(room);
+    },
     // 玩法宣告自己结束。墙立刻回到平常的样子，不留痕迹——
     // 默认的墙才是这个产品，玩法只是临时盖在上面的一层。
     end: () => {
@@ -204,17 +222,30 @@ function command(ws, msg) {
   }
 }
 
-// 发给客户端的玩法状态。玩法自己决定给每个人看多少——
+// 发给客户端的玩法状态。
+//
+// 这是一份**显示指令**，不是玩法的内部状态：客户端照着 label / action / drawable
+// 去渲染，不认识「接龙」「限笔」这些词。玩法自己决定给每个人看多少——
 // 别把底牌塞进去，这东西是直接发到浏览器里的。
+//
+//   label     横幅上那句话
+//   tone      圆点的样子：you 轮到你 / wait 等别人 / free 没人拿着
+//   action    横幅上的按钮 {cmd, label}，没有就不显示
+//   blocked   我此刻能不能落笔（客户端据此省下白画的力气，真正的拦截在服务端）
+//   why       画不了时底栏显示的原因
+//   drawable  我能画的横向范围 {x0,x1}；范围之外盖上斜纹
+//   hint      提示区 {x0,x1}，比如接龙里用来接线的那条窄缝
+//   hostActions  只有房主看得见的动作 [{cmd, label, confirm}]
 function publicState(room, user) {
   const mode = of(room);
   if (!mode) return null;
-  if (typeof mode.publicState !== "function") return { id: mode.id };
+  const base = { id: mode.id, name: mode.name || mode.id };
+  if (typeof mode.publicState !== "function") return base;
   try {
-    return { id: mode.id, ...mode.publicState(room, user) };
+    return { ...base, ...mode.publicState(room, user) };
   } catch (err) {
     console.error("mode publicState() failed", room.code, room.mode.id, err);
-    return { id: mode.id };
+    return base;
   }
 }
 
@@ -234,6 +265,7 @@ module.exports = {
   register,
   get,
   list,
+  catalog,
   of,
   gate,
   allow,

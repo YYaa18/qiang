@@ -88,13 +88,13 @@ const els = {
   menuBtn: $("btn-menu"),
   menu: $("menu"),
   menuExport: $("menu-export"),
-  menuRelay: $("menu-relay"),
-  menuReveal: $("menu-reveal"),
-  relayBar: $("relay-bar"),
-  relayDot: $("relay-dot"),
-  relayText: $("relay-text"),
-  relayAct: $("relay-act"),
-  relayMask: $("relay-mask"),
+  modeSep: $("mode-sep"),
+  modeLabel: $("mode-label"),
+  modeMenu: $("mode-menu"),
+  modeBar: $("mode-bar"),
+  modeText: $("mode-text"),
+  modeAct: $("mode-act"),
+  modeMask: $("mode-mask"),
   maskLeft: $("mask-left"),
   maskRight: $("mask-right"),
   maskSeam: $("mask-seam"),
@@ -190,7 +190,8 @@ const state = {
   cursorTimer: 0,
   lastCursor: 0,
   othersCursors: new Map(),
-  mode: null, // 正在玩的玩法（服务端发来的那份，只读）
+  mode: null, // 正在玩的玩法：一份显示指令，不是玩法的内部状态
+  modeList: [], // 服务端有哪些玩法，菜单照它长出来
   clearDeadline: null,
   clearTick: null,
   replaced: false,
@@ -784,11 +785,8 @@ function updateDrawingHint() {
     const u = state.users.find((x) => x.id === id);
     if (u) names.push(u.name);
   }
-  if (relayBlocks()) {
-    const r = relay();
-    els.drawingHint.textContent = r.holder
-      ? `${r.holderName || "别人"}正在画这一段`
-      : "笔放在墙上，接过来才能画";
+  if (modeBlocks()) {
+    els.drawingHint.textContent = modeNow().why || "现在还画不了";
     return;
   }
   els.drawingHint.textContent = names.length ? `${names.join("、")}落笔中` : "";
@@ -902,9 +900,9 @@ function glideToEnd() {
 }
 
 function updateExtendUi() {
-  const r = relay();
+  const m = modeNow();
   const blocked =
-    (state.locked && !(state.you && state.you.isHost)) || !!(r && !r.revealed);
+    (state.locked && !(state.you && state.you.isHost)) || !!(m && m.noExtend);
   els.extend.hidden = state.segments >= MAX_SEGMENTS || blocked;
   els.extend.style.left = `${wallW() + EXTEND_GAP}px`;
 }
@@ -940,7 +938,7 @@ function currentWidth() {
 function canDraw() {
   if (!state.you) return false;
   if (state.locked && !state.you.isHost) return false;
-  if (relayBlocks()) return false; // 没拿着笔就别费劲画了，服务端也不会收
+  if (modeBlocks()) return false; // 省下白画的力气；真正的拦截在服务端
   return !!(state.ws && state.ws.readyState === WebSocket.OPEN);
 }
 
@@ -1269,6 +1267,7 @@ function applySnapshot(snap) {
   state.chat = snap.chat || [];
   state.locked = !!snap.locked;
   state.mode = snap.mode || null;
+  state.modeList = snap.modes || [];
   state.you = snap.you;
   state.canUndo = !!(snap.you && snap.you.canUndo);
   state.canRedo = !!(snap.you && snap.you.canRedo);
@@ -1292,7 +1291,7 @@ function applySnapshot(snap) {
   renderTools();
   updateLockUi();
   updateStacks();
-  renderRelay();
+  renderModeBar();
   rememberRoom();
   if (snap.clearDeadline && snap.clearDeadline > Date.now()) {
     startClearUi(snap.clearDeadline);
@@ -1301,107 +1300,128 @@ function applySnapshot(snap) {
   }
 }
 
-// ───────────── 接龙 ─────────────
+// ───────────── 玩法的外壳 ─────────────
 //
-// 客户端这边只负责「看起来对」：谁拿着笔、我能画在哪。
-// 真正的遮挡在服务端——藏起来的笔画根本没发到这台机器上，F12 也翻不出来。
+// 这里不认识任何具体玩法。服务端发来的 state.mode 是一份**显示指令**
+// （label / action / drawable …），照着渲染就行；再加第几个玩法，这段都不用动。
+//
+// 遮挡在这里只是「看起来对」——真正藏起来的笔画根本没发到这台机器上。
 
-function relay() {
-  return state.mode && state.mode.id === "relay" ? state.mode : null;
+function modeNow() {
+  return state.mode || null;
 }
 
-// 我此刻能不能落笔（除了锁定之类的常规条件之外）
-function relayBlocks() {
-  const r = relay();
-  if (!r || r.revealed) return false;
-  return !(state.you && r.holder === state.you.id);
+// 我此刻能不能落笔。只是省下白画的力气，真正的拦截在服务端。
+function modeBlocks() {
+  const m = modeNow();
+  return !!(m && m.blocked);
 }
 
-function renderRelay() {
-  const r = relay();
-  const host = !!(state.you && state.you.isHost);
-  els.menuRelay.textContent = r ? "结束接龙" : "开始接龙";
-  els.menuReveal.hidden = !host || !r || r.revealed;
+function renderModeBar() {
+  const m = modeNow();
+  const bar = els.modeBar;
 
-  if (!r) {
-    els.relayBar.hidden = true;
-    els.relayMask.hidden = true;
+  // 菜单：清单里每个玩法一个入口，正在玩的那个变成「结束」
+  renderModeMenu();
+
+  if (!m) {
+    bar.hidden = true;
+    els.modeMask.hidden = true;
     return;
   }
-  els.relayBar.hidden = false;
+  bar.hidden = false;
+  bar.className = m.tone ? `tone-${m.tone}` : "";
+  els.modeText.textContent = m.label || m.name || "";
 
-  const mine = !!(state.you && r.holder === state.you.id);
-  const free = !r.holder;
-  els.relayBar.classList.toggle("free", free && !r.revealed);
-
-  if (r.revealed) {
-    els.relayText.textContent = `接龙揭晓了 · 一共 ${r.legCount} 段`;
-    els.relayAct.hidden = true;
-  } else if (mine) {
-    els.relayText.textContent = "轮到你画这一段";
-    els.relayAct.hidden = false;
-    els.relayAct.textContent = "画完了，交出去";
-  } else if (free) {
-    els.relayText.textContent = "笔放在墙上，没人拿着";
-    els.relayAct.hidden = false;
-    els.relayAct.textContent = "我来接";
+  if (m.action && m.action.cmd) {
+    els.modeAct.hidden = false;
+    els.modeAct.textContent = m.action.label || "好";
+    els.modeAct.dataset.cmd = m.action.cmd;
   } else {
-    els.relayText.textContent = `${r.holderName || "别人"}正在画`;
-    els.relayAct.hidden = true;
+    els.modeAct.hidden = true;
+    delete els.modeAct.dataset.cmd;
   }
-
-  renderMask();
+  renderModeMask();
 }
 
-// 把不属于我的那几段盖上。盖的是眼睛，不是数据。
-function renderMask() {
-  const r = relay();
-  if (!r || r.revealed || !r.myLeg) {
-    els.relayMask.hidden = true;
+// 我能画的范围之外盖上斜纹；hint 是玩法想额外标出来的一小块
+function renderModeMask() {
+  const m = modeNow();
+  if (!m || !m.drawable) {
+    els.modeMask.hidden = true;
     return;
   }
-  els.relayMask.hidden = false;
-  const { x0, x1 } = r.myLeg;
+  els.modeMask.hidden = false;
+  const { x0, x1 } = m.drawable;
   const wall = wallW();
+  els.maskLeft.hidden = x0 <= 0;
   els.maskLeft.style.left = "0px";
   els.maskLeft.style.width = `${Math.max(0, x0)}px`;
-  els.maskLeft.hidden = x0 <= 0;
+  els.maskRight.hidden = x1 >= wall;
   els.maskRight.style.left = `${x1}px`;
   els.maskRight.style.width = `${Math.max(0, wall - x1)}px`;
-  els.maskRight.hidden = x1 >= wall;
 
-  if (r.peekZone) {
+  if (m.hint) {
     els.maskSeam.hidden = false;
-    els.maskSeam.style.left = `${r.peekZone[0]}px`;
-    els.maskSeam.style.width = `${Math.max(1, r.peekZone[1] - r.peekZone[0])}px`;
+    els.maskSeam.style.left = `${m.hint[0]}px`;
+    els.maskSeam.style.width = `${Math.max(1, m.hint[1] - m.hint[0])}px`;
   } else {
     els.maskSeam.hidden = true;
   }
 }
 
-// 接过笔、或轮到自己时，把镜头带到自己那一段
-function lookAtMyLeg() {
-  const r = relay();
-  if (!r || !r.myLeg) return;
+// ⋯ 菜单里那一段「想玩点什么」，整段由服务端的清单长出来
+function renderModeMenu() {
+  const m = modeNow();
+  const host = !!(state.you && state.you.isHost);
+  const list = state.modeList || [];
+  els.modeMenu.innerHTML = "";
+  els.modeMenu.hidden = !host || !list.length;
+  els.modeSep.hidden = els.modeMenu.hidden;
+  els.modeLabel.hidden = els.modeMenu.hidden;
+  if (els.modeMenu.hidden) return;
+
+  if (m) {
+    add(els.modeMenu, `结束${m.name || "玩法"}`, () => {
+      if (confirm(`结束${m.name || "玩法"}？整面墙会对所有人打开。`)) modeCmd("stop");
+    });
+    for (const a of m.hostActions || []) {
+      add(els.modeMenu, a.label, () => {
+        if (!a.confirm || confirm(a.confirm)) modeCmd(a.cmd);
+      });
+    }
+    return;
+  }
+  for (const item of list) {
+    add(els.modeMenu, `开始${item.name}`, () => modeCmd("start", { mode: item.id }), item.hint);
+  }
+
+  function add(parent, text, onClick, title) {
+    const b = document.createElement("button");
+    b.type = "button";
+    b.textContent = text;
+    if (title) b.title = title;
+    b.addEventListener("click", () => {
+      els.menu.hidden = true;
+      onClick();
+    });
+    parent.appendChild(b);
+  }
+}
+
+// 玩法限定了可画范围时，把镜头带过去
+function lookAtDrawable() {
+  const m = modeNow();
+  if (!m || !m.drawable) return;
   const view = els.desk.clientWidth / state.scale;
-  const mid = (r.myLeg.x0 + r.myLeg.x1) / 2;
+  const mid = (m.drawable.x0 + m.drawable.x1) / 2;
   state.panX = (mid - view / 2) * state.scale;
   clampPan();
   applyView();
 }
 
-function relayCmd(cmd, extra) {
+function modeCmd(cmd, extra) {
   send({ type: "mode", cmd, ...(extra || {}) });
-}
-
-function onRelayAct() {
-  const r = relay();
-  if (!r) return;
-  if (state.you && r.holder === state.you.id) {
-    relayCmd("pass");
-  } else if (!r.holder) {
-    relayCmd("take");
-  }
 }
 
 function renderTools() {
@@ -1424,7 +1444,7 @@ function renderTools() {
   document.querySelectorAll(".host-only").forEach((el) => {
     el.hidden = !host;
   });
-  renderRelay(); // 「揭晓」只在接龙进行中才出现，得盖过上面那句统一开关
+  renderModeBar(); // 玩法那一段菜单自己决定显示什么，得盖过上面那句统一开关
   els.menuLock.textContent = state.locked ? "解锁画布" : "锁定画布";
 }
 
@@ -1973,7 +1993,7 @@ function onMessage(msg) {
       const added = [];
       for (let i = before; i < state.segments; i++) added.push(i);
       rebuildInk(added);
-      renderMask(); // 墙长了，右边那块遮挡要跟着铺过去
+      renderModeMask(); // 墙长了，右边那块遮挡要跟着铺过去
       if (state.you && msg.userId === state.you.id) glideToEnd();
       else applyView();
       break;
@@ -2006,15 +2026,13 @@ function onMessage(msg) {
       updateStacks();
       break;
     case "mode": {
-      const before = relay();
-      const wasMine = !!(before && state.you && before.holder === state.you.id);
+      const had = !!(state.mode && state.mode.drawable);
       state.mode = msg.state || null;
-      renderRelay();
+      renderModeBar();
       updateExtendUi();
       updateDrawingHint();
-      const now = relay();
-      const mineNow = !!(now && state.you && now.holder === state.you.id);
-      if (mineNow && !wasMine) lookAtMyLeg(); // 刚接过笔，把镜头带过去
+      // 刚轮到我：把镜头带到我能画的那一段
+      if (!had && state.mode && state.mode.drawable) lookAtDrawable();
       break;
     }
     case "cursors":
@@ -2919,19 +2937,10 @@ function bindUi() {
     els.menu.hidden = true;
     send({ type: "clear_start" });
   });
-  els.menuRelay.addEventListener("click", () => {
-    els.menu.hidden = true;
-    if (relay()) {
-      if (confirm("结束接龙？整面墙会揭晓给所有人。")) relayCmd("stop");
-    } else {
-      relayCmd("start", { mode: "relay" });
-    }
+  els.modeAct.addEventListener("click", () => {
+    const cmd = els.modeAct.dataset.cmd;
+    if (cmd) modeCmd(cmd);
   });
-  els.menuReveal.addEventListener("click", () => {
-    els.menu.hidden = true;
-    if (confirm("现在揭晓？所有人都会看到整条卷轴。")) relayCmd("reveal");
-  });
-  els.relayAct.addEventListener("click", onRelayAct);
   els.menuRename.addEventListener("click", () => {
     els.menu.hidden = true;
     const n = prompt("怎么称呼你", state.name || "");

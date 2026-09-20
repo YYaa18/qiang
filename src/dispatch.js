@@ -14,6 +14,7 @@ const modes = require("./modes");
 // 玩法在这里登记。放在这而不是 modes/index.js 里，是因为玩法文件可以引用 wall/*，
 // 而 wall/* 又引用 modes——让 index 去 require 它们就绕回来了。
 require("./modes/relay");
+require("./modes/limit");
 
 const ROUTES = {
   join: (ws, msg) => presence.handleJoin(ws, msg),
