@@ -88,6 +88,7 @@ const els = {
   menuBtn: $("btn-menu"),
   menu: $("menu"),
   menuExport: $("menu-export"),
+  menuGallery: $("menu-gallery"),
   modeSep: $("mode-sep"),
   modeLabel: $("mode-label"),
   modeMenu: $("mode-menu"),
@@ -2480,40 +2481,56 @@ function onWheel(e) {
   applyView();
 }
 
+// 一段纸加墨迹，按 k 缩放画到 ctx 的 dx 处。导出和展厅共用这一份。
+// ink 是调用方给的暂存画布（至少 SEG_W*k × CANVAS_H*k），逐段复用，不在内存里攒着。
+// 墨迹图没加载出来时照样画出矢量部分，返回 false 让调用方决定要不要提示。
+async function drawSegment(ctx, dx, i, k, list, ink) {
+  makePaper();
+  const segW = SEG_W * k;
+  const H = Math.round(CANVAS_H * k);
+  ctx.drawImage(paperCanvas, dx, 0, segW, H);
+  const ictx = ink.getContext("2d");
+  ictx.setTransform(1, 0, 0, 1, 0, 0);
+  ictx.clearRect(0, 0, ink.width, ink.height);
+  ictx.setTransform(k, 0, 0, k, -i * segW, 0);
+  const v = state.segVersions[i] || 0;
+  let base = null;
+  let ok = true;
+  if (v) {
+    try {
+      base = await loadSegImage(i, v);
+    } catch {
+      ok = false;
+    }
+  }
+  paintSegment(ictx, i, list, base, state.frozenUpTo);
+  ctx.drawImage(ink, dx, 0);
+  return ok;
+}
+
+function scratchCanvas(k) {
+  const c = document.createElement("canvas");
+  c.width = Math.ceil(SEG_W * k);
+  c.height = Math.round(CANVAS_H * k);
+  return c;
+}
+
 // 导出整条卷轴；超过浏览器单张图宽度上限（约 32000px）时按比例缩小
 const EXPORT_MAX_W = 32000;
 
 async function exportPng() {
-  makePaper();
   const k = Math.min(1, EXPORT_MAX_W / wallW());
-  const segW = SEG_W * k;
-  const H = Math.round(CANVAS_H * k);
   const out = document.createElement("canvas");
   out.width = Math.round(wallW() * k);
-  out.height = H;
+  out.height = Math.round(CANVAS_H * k);
   const ctx = out.getContext("2d");
   const list = sortedStrokes();
-  const ink = document.createElement("canvas");
-  ink.width = Math.ceil(segW);
-  ink.height = H;
-  const ictx = ink.getContext("2d");
+  const ink = scratchCanvas(k);
+  let missing = false;
   for (let i = 0; i < state.segments; i++) {
-    ctx.drawImage(paperCanvas, i * segW, 0, segW, H);
-    ictx.setTransform(1, 0, 0, 1, 0, 0);
-    ictx.clearRect(0, 0, ink.width, ink.height);
-    ictx.setTransform(k, 0, 0, k, -i * segW, 0);
-    const v = state.segVersions[i] || 0;
-    let base = null;
-    if (v) {
-      try {
-        base = await loadSegImage(i, v); // 逐段加载、用完即丢，不在内存里攒着
-      } catch {
-        toast("有一段墨迹图没加载出来");
-      }
-    }
-    paintSegment(ictx, i, list, base, state.frozenUpTo);
-    ctx.drawImage(ink, i * segW, 0);
+    if (!(await drawSegment(ctx, i * SEG_W * k, i, k, list, ink))) missing = true;
   }
+  if (missing) toast("有一段墨迹图没加载出来");
   const a = document.createElement("a");
   const t = new Date();
   const pad = (n) => String(n).padStart(2, "0");
@@ -2529,6 +2546,25 @@ async function exportPng() {
     a.click();
     setTimeout(() => URL.revokeObjectURL(a.href), 10000);
   }, "image/png");
+}
+
+// 3D 展厅：整条卷轴挂在墙上走一遍。展出的是打开那一刻的样子，和导出 PNG 一样。
+// 展厅按 1024 宽取每一段——斜着看的墙用不上原尺寸，显存省一半多
+const GALLERY_K = 0.64;
+
+function openGallery() {
+  if (!window.Gallery) return;
+  const list = sortedStrokes();
+  const ok = window.Gallery.open({
+    segments: state.segments,
+    title: `墙 ${state.code || ""}`,
+    render: async (i) => {
+      const c = scratchCanvas(GALLERY_K);
+      await drawSegment(c.getContext("2d"), 0, i, GALLERY_K, list, scratchCanvas(GALLERY_K));
+      return c;
+    },
+  });
+  if (!ok) toast("这个浏览器打不开 3D 展厅");
 }
 
 function showLobby() {
@@ -2983,6 +3019,10 @@ function bindUi() {
   els.menuExport.addEventListener("click", () => {
     els.menu.hidden = true;
     exportPng();
+  });
+  els.menuGallery.addEventListener("click", () => {
+    els.menu.hidden = true;
+    openGallery();
   });
   els.menuLock.addEventListener("click", () => {
     els.menu.hidden = true;
