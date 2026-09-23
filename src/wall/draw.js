@@ -268,7 +268,53 @@ function handleRedo(ws) {
   modes.after(room, { type: "redo", id, userId: user.id });
 }
 
+// ───────────── 玩法用的两样东西 ─────────────
+
+// 玩法自己往墙上放一笔（比如连线谜题的圆点）。不进任何人的撤销栈——
+// 它不是谁画的，谁也撤不掉；之后和别的笔一样冻结、导出、进展厅。
+function placeStroke(room, fields) {
+  const stroke = {
+    id: `${room.code}-${room.nextSeq}-${Math.random().toString(36).slice(2, 10)}`,
+    seq: room.nextSeq++,
+    userId: "",
+    type: "pen",
+    hidden: false,
+    t: Date.now(),
+    ...fields,
+  };
+  room.strokes.push(stroke);
+  modes.broadcastStroke(room, { type: "stroke_end", id: stroke.id, userId: "", stroke }, stroke);
+  scheduleSave(room);
+  maybeBake(room);
+  return stroke;
+}
+
+// 把刚落定的一笔退回去：玩法判它不算数（连线谜题里画交叉了）。
+// 对屋里的人来说就是一次撤销——客户端本来就认 undo，不用新消息。
+// 但它不进重做栈：退回的笔不该被重做回来。
+function retractStroke(room, id) {
+  const stroke = room.strokes.find((s) => s.id === id);
+  if (!stroke || stroke.hidden) return false;
+  stroke.hidden = true;
+  touchJob(room, id);
+  const st = ensureStack(room, stroke.userId);
+  const i = st.undo.lastIndexOf(id);
+  if (i >= 0) st.undo.splice(i, 1);
+  broadcast(room, {
+    type: "undo",
+    id,
+    userId: stroke.userId,
+    canUndo: st.undo.length > 0,
+    canRedo: st.redo.length > 0,
+  });
+  scheduleSave(room);
+  maybeBake(room);
+  return true;
+}
+
 module.exports = {
+  placeStroke,
+  retractStroke,
   finishOpenStrokes,
   commitStroke,
   handleStrokeStart,

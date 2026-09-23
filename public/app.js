@@ -1463,9 +1463,14 @@ function renderModeMenu() {
 function lookAtDrawable() {
   const m = modeNow();
   if (!m || !m.drawable) return;
+  // 能画的那块装不下就缩小到装得下：接龙的一棒、谜题的一段纸，都得一眼看全
+  const span = m.drawable.x1 - m.drawable.x0;
+  const fitW = (els.desk.clientWidth - PAD * 2) / span;
+  if (state.scale > fitW) state.scale = Math.max(scaleLimits().min, fitW);
   const view = els.desk.clientWidth / state.scale;
   const mid = (m.drawable.x0 + m.drawable.x1) / 2;
-  state.panX = (mid - view / 2) * state.scale;
+  // 屏幕上的 x = panX + 墙上的 x × scale，所以要让 mid 落在屏幕中间，panX 是负的
+  state.panX = -(mid - view / 2) * state.scale;
   clampPan();
   applyView();
 }

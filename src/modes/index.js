@@ -210,7 +210,9 @@ function command(ws, msg) {
     }
     if (typeof mode.stop === "function") mode.stop(room, user, apiFor(room));
     room.mode = null;
-    scheduleSave(room);
+    // 告诉每个人玩法没了：横幅、斜纹遮挡都要撤掉。这件事不能指望每个玩法的 stop 记得做——
+    // 限笔、一日一笔当初就都没做，结束之后横幅一直挂到刷新为止
+    apiFor(room).announce();
     return;
   }
 

@@ -1109,6 +1109,43 @@ async function main() {
       assert(bsnap.mode && bsnap.mode.left === 1, "乙今天的一笔还在");
     });
 
+    await test("link: a fresh segment of dots, and crossings bounce for everyone", async () => {
+      const hostId = uuid();
+      const code = await createRoom(port, hostId);
+      const a = track(await join(port, { code, name: "甲", clientId: hostId }));
+      const asnap = await a.wait("snapshot");
+      const b = track(await join(port, { code, name: "乙", clientId: uuid() }));
+      await b.wait("snapshot");
+
+      // 墙上已经有画了：谜题该另起一段干净的纸
+      const doodle = drawStrokes(a, asnap.you.color, 1, 600);
+      await b.wait((m) => m.type === "stroke_end" && m.id === doodle[0]);
+
+      a.send({ type: "mode", cmd: "start", mode: "link", pairs: 3 });
+      const grew = await b.wait("extend");
+      assert(grew.segments === 2, "接了一段新的，got " + grew.segments);
+      const bm = await b.wait((m) => m.type === "mode" && m.state);
+      assert(bm.state.drawable.x0 === 1600 && bm.state.total === 3, "谜题在第二段，三对点");
+      await delay(150);
+      const dots = b.msgs.filter((m) => m.type === "stroke_end" && m.stroke && m.stroke.userId === "");
+      assert(dots.length === 6, "乙收到了六个圆点，got " + dots.length);
+
+      // 从空白处起笔：起笔就被拦下
+      a.send({ type: "stroke_start", id: uuid(), strokeType: "pen", color: asnap.you.color, width: 8, x: 1610, y: 10 });
+      const err = await a.wait("error");
+      assert(err.message === "要从一个圆点开始画", "got " + err.message);
+
+      // 从一个点起笔、终点不对：画完被退回，乙那边看到的是一次撤销
+      const d = dots[0].stroke.points[0];
+      const id = uuid();
+      a.send({ type: "stroke_start", id, strokeType: "pen", color: asnap.you.color, width: 8, x: d.x, y: d.y });
+      a.send({ type: "stroke_point", id, points: [{ x: d.x + 5, y: d.y + 5 }] });
+      a.send({ type: "stroke_end", id });
+      await b.wait((m) => m.type === "undo" && m.id === id);
+      const why = await a.wait((m) => m.type === "error" && m !== err);
+      assert(why.message === "要连到同色的另一个点上", "got " + why.message);
+    });
+
     await test("blind: only the person drawing cannot see it", async () => {
       const hostId = uuid();
       const code = await createRoom(port, hostId);

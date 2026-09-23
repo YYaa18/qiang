@@ -222,11 +222,16 @@ function handleExtend(ws) {
     send(ws, { type: "error", code: "max_length", message: "墙已经够长了" });
     return;
   }
-  room.segments += 1;
-  broadcast(room, { type: "extend", segments: room.segments, userId: user.id });
+  growWall(room, user.id);
   pushSystem(room, `${user.name}把墙接长了一段`);
+}
+
+// 墙向右接一段。玩法也用它（连线谜题要一段干净的纸），所以不管闸门和锁——那是调用方的事
+function growWall(room, userId) {
+  room.segments += 1;
+  broadcast(room, { type: "extend", segments: room.segments, userId });
   scheduleSave(room);
-  modes.after(room, { type: "extend", segments: room.segments, userId: user.id });
+  modes.after(room, { type: "extend", segments: room.segments, userId });
 }
 
 module.exports = {
@@ -238,4 +243,5 @@ module.exports = {
   handleRename,
   handleLock,
   handleExtend,
+  growWall,
 };
