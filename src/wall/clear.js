@@ -67,6 +67,8 @@ function finishClear(room) {
   room.mode = null; // 清空就是回到一面新的墙，正在玩的也一并结束
   fs.rmSync(roomDir(room), { recursive: true, force: true });
   broadcast(room, { type: "clear_done" });
+  // 玩法一并结束了，得告诉每个人把横幅和遮挡撤掉——和房主「结束」玩法是同一个坑
+  modes.apiFor(room).announce();
   pushSystem(room, "墙被清空了");
   scheduleSave(room);
   modes.after(room, { type: "clear" });

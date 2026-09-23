@@ -20,6 +20,7 @@ require("./modes/tell");
 require("./modes/turf");
 require("./modes/daily");
 require("./modes/link");
+require("./modes/weather");
 
 const ROUTES = {
   join: (ws, msg) => presence.handleJoin(ws, msg),

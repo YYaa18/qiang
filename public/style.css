@@ -1246,3 +1246,7 @@ button:disabled { opacity: 0.4; cursor: default; }
   .gallery-where { display: none; }
   .gallery-hint { display: none; }
 }
+
+/* 玩法收走的工具（风化墙里没有橡皮） */
+#toolbar .tool:disabled { opacity: 0.3; cursor: not-allowed; }
+#toolbar .tool:disabled:hover { background: none; }

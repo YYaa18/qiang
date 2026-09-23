@@ -377,6 +377,7 @@ function syncTiles() {
     root.appendChild(tile.ink);
     els.tiles.appendChild(root);
     state.tiles.set(i, tile);
+    applyFadeMask(tile);
     ensureBase(tile);
     fresh.push(i);
   }
@@ -1275,6 +1276,7 @@ function applySnapshot(snap) {
   state.chat = snap.chat || [];
   state.locked = !!snap.locked;
   state.mode = snap.mode || null;
+  loadFade();
   state.modeList = snap.modes || [];
   state.you = snap.you;
   state.canUndo = !!(snap.you && snap.you.canUndo);
@@ -1317,6 +1319,130 @@ function applySnapshot(snap) {
 
 function modeNow() {
   return state.mode || null;
+}
+
+// ───────────── 褪色遮罩 ─────────────
+//
+// 玩法可以给墨层盖一张褪色图（fade 显示指令，现在是风化墙在用）：墙切成格子，
+// 每格记最后一次有人在这儿落笔的时刻，越久没人碰越淡。
+// 每段画成一张很小的透明度图（一格一个像素），当作墨层的 CSS 遮罩放大铺满——
+// 放大时浏览器会插值，格子之间就成了柔和的渐变。只盖墨层，纸纹不动；
+// 冻结成墨迹图的旧笔也一样褪，因为遮罩根本不关心底下是哪一笔。
+
+const FADE_B64 = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+let fadeCells = new Map(); // 段号 → 每格被碰过的时刻（开局后第几个小时）
+let fadeTimer = 0;
+
+function fadeNow() {
+  const m = modeNow();
+  return (m && m.fade) || null;
+}
+
+function fadeGrid(f) {
+  return { cols: Math.round(SEG_W / f.cell), rows: Math.round(CANVAS_H / f.cell) };
+}
+
+// 玩法状态一变就整张重读：服务端给的是权威的那一份
+function loadFade() {
+  const f = fadeNow();
+  fadeCells = new Map();
+  if (f) {
+    const { cols, rows } = fadeGrid(f);
+    for (const [k, str] of Object.entries(f.segs || {})) {
+      const cells = new Array(cols * rows).fill(0);
+      for (let i = 0; i < cells.length && i * 2 + 1 < str.length; i++) {
+        cells[i] = (FADE_B64.indexOf(str[i * 2]) << 6) | FADE_B64.indexOf(str[i * 2 + 1]);
+      }
+      fadeCells.set(Number(k), cells);
+    }
+  }
+  refreshFadeMasks();
+  clearInterval(fadeTimer);
+  fadeTimer = f ? setInterval(() => refreshFadeMasks(), 60 * 1000) : 0; // 以天计的褪色，一分钟看一眼足够
+}
+
+// 碰过之后多久、淡到什么程度：先一动不动地留一阵（hold），再平滑地褪到只剩影子（floor）
+function fadeAlpha(f, h, now) {
+  const age = (now - f.t0) / f.hour - h;
+  const x = Math.max(0, Math.min(1, age / f.span));
+  const t = Math.max(0, Math.min(1, (x - f.hold) / (1 - f.hold)));
+  return f.floor + (1 - f.floor) * (1 - t * t * (3 - 2 * t));
+}
+
+function fadeMaskCanvas(i) {
+  const f = fadeNow();
+  const { cols, rows } = fadeGrid(f);
+  const c = document.createElement("canvas");
+  c.width = cols;
+  c.height = rows;
+  const ctx = c.getContext("2d");
+  const img = ctx.createImageData(cols, rows);
+  const cells = fadeCells.get(i);
+  const now = Date.now();
+  for (let col = 0; col < cols; col++) {
+    for (let row = 0; row < rows; row++) {
+      const a = cells ? fadeAlpha(f, cells[col * rows + row], now) : 1;
+      img.data[(row * cols + col) * 4 + 3] = Math.round(a * 255);
+    }
+  }
+  ctx.putImageData(img, 0, 0);
+  return c;
+}
+
+function applyFadeMask(tile) {
+  const st = tile.ink.style;
+  if (!fadeNow()) {
+    st.maskImage = st.webkitMaskImage = "";
+    return;
+  }
+  st.maskImage = st.webkitMaskImage = `url(${fadeMaskCanvas(tile.i).toDataURL()})`;
+  st.maskSize = st.webkitMaskSize = "100% 100%";
+  st.maskRepeat = st.webkitMaskRepeat = "no-repeat";
+}
+
+function refreshFadeMasks(which) {
+  for (const t of state.tiles.values()) {
+    if (!which || which.includes(t.i)) applyFadeMask(t);
+  }
+}
+
+// 一笔落定：它经过的格子记成「刚刚」，返回碰到的段号。
+// 这是服务端 weather.js cellsOf() 的抄本——两边同一条规则，服务端就不必每一笔都广播整张表。
+// 时刻用笔画自己带的 t（服务端时间），不用本机时钟，两边才对得上。
+function touchFade(s) {
+  const f = fadeNow();
+  if (!f || !s || s.type === "eraser") return [];
+  const { cols, rows } = fadeGrid(f);
+  const h = Math.max(0, Math.floor(((s.t || Date.now()) - f.t0) / f.hour));
+  const touched = new Set();
+  const mark = (x, y, r) => {
+    const r0 = Math.max(0, Math.floor((y - r) / f.cell));
+    const r1 = Math.min(rows - 1, Math.floor((y + r) / f.cell));
+    for (let c = Math.max(0, Math.floor((x - r) / f.cell)); c <= Math.floor((x + r) / f.cell); c++) {
+      const seg = Math.floor(c / cols);
+      if (seg >= state.segments) continue;
+      if (!fadeCells.has(seg)) fadeCells.set(seg, new Array(cols * rows).fill(h));
+      const cells = fadeCells.get(seg);
+      for (let row = r0; row <= r1; row++) cells[(c % cols) * rows + row] = h;
+      touched.add(seg);
+    }
+  };
+  if (s.type === "text") {
+    const w = String(s.text || "").length * 28;
+    for (let x = s.x; x <= s.x + w; x += f.cell / 2) mark(x, s.y + 16, 20);
+  } else {
+    const pts = s.points || [];
+    const r = (s.width || 0) / 2 + f.pad;
+    const step = Math.max(4, Math.min(f.cell / 2, r));
+    if (pts.length) mark(pts[0].x, pts[0].y, r);
+    for (let i = 1; i < pts.length; i++) {
+      const a = pts[i - 1];
+      const b = pts[i];
+      const n = Math.ceil(Math.hypot(b.x - a.x, b.y - a.y) / step);
+      for (let k = 1; k <= n; k++) mark(a.x + ((b.x - a.x) * k) / n, a.y + ((b.y - a.y) * k) / n, r);
+    }
+  }
+  return [...touched];
 }
 
 // 我此刻能不能落笔。只是省下白画的力气，真正的拦截在服务端。
@@ -1480,6 +1606,11 @@ function modeCmd(cmd, extra) {
 }
 
 function renderTools() {
+  const m = modeNow();
+  const noEraser = !!(m && m.noEraser);
+  if (noEraser && state.tool === "eraser") state.tool = "pen";
+  const eraserBtn = els.toolbar.querySelector('.tool[data-tool="eraser"]');
+  if (eraserBtn) eraserBtn.disabled = noEraser;
   document.documentElement.style.setProperty("--me", (state.you && state.you.color) || "#1A1A1A");
   els.desk.classList.toggle("hand-mode", state.tool === "hand");
   els.toolbar.querySelectorAll(".tool").forEach((btn) => {
@@ -2029,6 +2160,7 @@ function onMessage(msg) {
     case "stroke_end": {
       state.live.delete(msg.id);
       if (msg.stroke) upsertStroke(msg.stroke);
+      if (fadeNow()) refreshFadeMasks(touchFade(msg.stroke));
       if (state.current && state.current.id === msg.id) {
         state.current = null;
         state.drawing = false;
@@ -2039,6 +2171,7 @@ function onMessage(msg) {
     }
     case "text_place":
       if (msg.stroke) upsertStroke(msg.stroke);
+      if (fadeNow()) refreshFadeMasks(touchFade(msg.stroke));
       rebuildInk(tilesOf(msg.stroke));
       break;
     case "extend": {
@@ -2085,6 +2218,8 @@ function onMessage(msg) {
       const had = !!(state.mode && state.mode.drawable);
       const hidBefore = !!(state.mode && state.mode.hideOwnInk);
       state.mode = msg.state || null;
+      loadFade();
+      renderTools(); // 玩法可能收走了橡皮
       renderModeBar();
       updateExtendUi();
       updateDrawingHint();
@@ -2510,6 +2645,14 @@ async function drawSegment(ctx, dx, i, k, list, ink) {
     }
   }
   paintSegment(ictx, i, list, base, state.frozenUpTo);
+  if (fadeNow()) {
+    ictx.setTransform(1, 0, 0, 1, 0, 0);
+    ictx.globalCompositeOperation = "destination-in";
+    ictx.imageSmoothingEnabled = true;
+    ictx.imageSmoothingQuality = "high";
+    ictx.drawImage(fadeMaskCanvas(i), 0, 0, segW, H);
+    ictx.globalCompositeOperation = "source-over";
+  }
   ctx.drawImage(ink, dx, 0);
   return ok;
 }

@@ -489,6 +489,94 @@ test("link: generated puzzles are never a straight-line walkover", () => {
   }
 });
 
+// ───────────── 风化墙 ─────────────
+
+const weather = require("../src/modes/weather");
+const clear = require("../src/wall/clear");
+const presence = require("../src/wall/presence");
+
+const HOUR = 60 * 60 * 1000;
+let wNow = Date.parse("2026-09-23T10:00:00+08:00");
+weather._clock.now = () => wNow;
+
+function weatherRoom() {
+  const w = wiredRoom(null);
+  w.room.mode = { id: "weather" };
+  weather.init(w.room, { id: "u1" }, {}, modes.apiFor(w.room));
+  return w;
+}
+
+// 第 seg 段第 (col,row) 格被碰过的时刻（开局后第几个小时）
+function cellHour(room, seg, col, row) {
+  return weather._decode(room.mode.segs[seg])[col * weather.ROWS + row];
+}
+
+test("weather: every segment starts fresh, and the client gets a fade map", () => {
+  const { room, sent } = weatherRoom();
+  const st = sent.filter((m) => m.type === "mode").pop().state;
+  assert.ok(st.fade && st.fade.segs[0], "发给客户端的是一份褪色图");
+  assert.strictEqual(st.fade.segs[0].length, weather.COLS * weather.ROWS * 2, "每格两个字符");
+  assert.strictEqual(cellHour(room, 0, 5, 5), 0);
+  assert.ok(!("days" in st) && !("segs" in st), "只发显示指令，不发内部状态");
+});
+
+test("weather: drawing over a place makes it new again, and only there", () => {
+  const { room, ws } = weatherRoom();
+  wNow += 30 * HOUR;
+  const id = "weather-stroke-0001";
+  draw.handleStrokeStart(ws, { ...penMsg(), id, x: 110, y: 110 });
+  draw.handleStrokePoint(ws, { id, points: [{ x: 290, y: 110 }] });
+  draw.handleStrokeEnd(ws, { id });
+  assert.strictEqual(cellHour(room, 0, 2, 2), 30, "笔经过的格子回到「刚刚」");
+  assert.strictEqual(cellHour(room, 0, 5, 2), 30);
+  assert.strictEqual(cellHour(room, 0, 2, 10), 0, "没碰到的格子还是老样子");
+  assert.strictEqual(cellHour(room, 0, 10, 2), 0);
+});
+
+test("weather: a stroke across the seam refreshes both segments", () => {
+  const { room, ws } = weatherRoom();
+  presence.growWall(room, "u1");
+  assert.ok(room.mode.segs[1], "接出来的新段也有一份");
+  wNow += 5 * HOUR;
+  const id = "weather-stroke-0002";
+  draw.handleStrokeStart(ws, { ...penMsg(), id, x: 1580, y: 500 });
+  draw.handleStrokePoint(ws, { id, points: [{ x: 1620, y: 500 }] });
+  draw.handleStrokeEnd(ws, { id });
+  const h = Math.floor((wNow - room.mode.t0) / HOUR);
+  assert.strictEqual(cellHour(room, 0, 31, 10), h, "左边那段的最后一列");
+  assert.strictEqual(cellHour(room, 1, 0, 10), h, "右边那段的第一列");
+});
+
+test("weather: no eraser — time does the erasing", () => {
+  const { room, ws, sent } = weatherRoom();
+  draw.handleStrokeStart(ws, { ...penMsg(), id: "weather-eraser-01", strokeType: "eraser", width: 24 });
+  assert.strictEqual(room.open.size, 0);
+  assert.match(sent.filter((m) => m.type === "error").pop().message, /没有橡皮/);
+  assert.strictEqual(sent.filter((m) => m.type === "mode").pop().state.noEraser, true, "客户端据此把橡皮变灰");
+});
+
+test("weather: the fade map is saved with the room and read back", () => {
+  const { room, ws } = weatherRoom();
+  wNow += 3 * HOUR;
+  const id = "weather-stroke-0003";
+  draw.handleStrokeStart(ws, { ...penMsg(), id, x: 400, y: 400 });
+  draw.handleStrokeEnd(ws, { id });
+  const h = cellHour(room, 0, 8, 8);
+  store.saveRoomNow(room);
+  store.rooms.delete(room.code);
+  const back = store.getRoom(room.code);
+  assert.strictEqual(weather._decode(back.mode.segs[0])[8 * weather.ROWS + 8], h);
+});
+
+test("clearing the wall tells everyone the mode is gone", () => {
+  const { room, sent } = weatherRoom();
+  sent.length = 0;
+  clear.finishClear(room);
+  assert.strictEqual(room.mode, null);
+  const gone = sent.filter((m) => m.type === "mode").pop();
+  assert.ok(gone && gone.state === null, "清空之后横幅和遮罩都该撤掉");
+});
+
 fs.rmSync(dataDir, { recursive: true, force: true });
 
 console.log("");
