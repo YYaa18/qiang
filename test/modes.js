@@ -585,21 +585,69 @@ test("weather: the demo counts in seconds and fades in three minutes", () => {
 test("weather: running out of room to count shifts the clock, and nothing visible changes", () => {
   const w = wiredRoom(null);
   w.room.mode = { id: "weather" };
-  weather.init(w.room, { id: "u1" }, { demo: true }, modes.apiFor(w.room));
+  weather.init(w.room, { id: "u1" }, { days: 7 }, modes.apiFor(w.room));
   const t0 = w.room.mode.t0;
-  // 一个半小时之后（远超两个字符记得下的 68 分钟）有人落笔
-  wNow += 90 * 60 * 1000;
+  // 两百天之后（远超两个字符记得下的 170 天）有人落笔
+  wNow += 200 * 24 * HOUR;
   w.sent.length = 0;
-  const id = "weather-demo-0002";
+  const id = "weather-long-0001";
   draw.handleStrokeStart(w.ws, { ...penMsg(), id, x: 400, y: 400 });
   draw.handleStrokeEnd(w.ws, { id });
   const m = w.room.mode;
   assert.ok(m.t0 > t0, "起点往后挪了");
   const fresh = cellHour(w.room, 0, 8, 8);
   assert.ok(fresh < weather.MAX_U, "新落的这一笔记得下，got " + fresh);
-  assert.strictEqual((wNow - m.t0) / 1000 - fresh < 1, true, "而且记的就是「刚刚」");
+  assert.ok((wNow - m.t0) / HOUR - fresh < 1, "而且记的就是「刚刚」");
   assert.strictEqual(cellHour(w.room, 0, 20, 15), 0, "老格子减到 0——它早就褪到底了");
   assert.ok(w.sent.some((x) => x.type === "mode" && x.state && x.state.fade.t0 === m.t0), "挪过之后给每个人重发了一份");
+});
+
+function demoRoom() {
+  const w = wiredRoom(null);
+  w.room.mode = { id: "weather" };
+  weather.init(w.room, { id: "u1" }, { demo: true }, modes.apiFor(w.room));
+  return w;
+}
+
+function traceAt(w, seconds) {
+  wNow = w.room.mode.startedAt + seconds * 1000;
+  const id = `weather-trace-${String(seconds).padStart(6, "0")}`;
+  draw.handleStrokeStart(w.ws, { ...penMsg(), id, x: 400, y: 400 });
+  draw.handleStrokeEnd(w.ws, { id });
+}
+
+test("weather demo: nobody traces, it ends exactly three minutes in", () => {
+  const w = demoRoom();
+  const m = w.room.mode;
+  assert.strictEqual(m.endsAt - m.startedAt, 180 * 1000);
+  assert.strictEqual(w.sent.filter((x) => x.type === "mode").pop().state.endsAt, m.endsAt, "横幅拿到截止时刻，自己倒数");
+});
+
+test("weather demo: tracing pushes the end back so your trace gets to fade too", () => {
+  const w = demoRoom();
+  const start = w.room.mode.startedAt;
+  w.sent.length = 0;
+  traceAt(w, 90);
+  assert.strictEqual(w.room.mode.endsAt - start, 270 * 1000, "90 秒时描的，等到 270 秒它才褪完");
+  const told = w.sent.filter((x) => x.type === "mode").pop();
+  assert.ok(told && told.state.endsAt === w.room.mode.endsAt, "倒计时变了，告诉了每个人");
+});
+
+test("weather demo: but never past ten minutes, however much people draw", () => {
+  const w = demoRoom();
+  traceAt(w, 9 * 60 + 30);
+  assert.strictEqual(w.room.mode.endsAt - w.room.mode.startedAt, 10 * 60 * 1000);
+});
+
+test("weather demo: past its end, it finishes the moment the room is loaded", () => {
+  const w = demoRoom();
+  const { room } = w;
+  store.saveRoomNow(room);
+  store.rooms.delete(room.code);
+  wNow = room.mode.endsAt + 5000; // 服务器停在截止之前，重启时已经过点了
+  const back = store.getRoom(room.code);
+  assert.strictEqual(back.mode, null, "读起来就收掉了，墨迹全部回来");
+  assert.ok(back.chat.some((c) => c.text && c.text.includes("演示结束")));
 });
 
 test("a mode's variants become menu entries", () => {

@@ -31,7 +31,8 @@
 
 const { SEG_W, CANVAS_H } = require("../config");
 const { pushSystem } = require("../wall/chat");
-const { register } = require("./index");
+const { register, apiFor } = require("./index");
+const store = require("../store");
 
 const CELL = 50;
 const COLS = SEG_W / CELL; // 32
@@ -44,6 +45,13 @@ const DAY_CHOICES = [1, 3, 7, 30];
 const DEFAULT_DAYS = 7;
 // 演示档：当面给朋友看「褪了、描一下又回来了」，等不了一天
 const DEMO_SECONDS = 3 * 60;
+// 演示在整面墙都褪成影子时自己结束——没人描就是正好 3 分钟；有人描了，等他描的那一块也褪完。
+// 不在 3 分钟整点掐断：那样刚描的一笔还没来得及褪就整面弹回来，描了也会再褪这件事就看不到了。
+// 但一直有人在画也不能没完没了，从开局算最多 10 分钟。
+const DEMO_CAP_MS = 10 * 60 * 1000;
+
+/** @type {WeakMap<object, ReturnType<typeof setTimeout>>} */
+const timers = new WeakMap();
 const HOLD = 0.1; // 前 10% 的时间一点不褪：刚画的总得先好好看两天
 const FLOOR = 0.08; // 褪到底剩下的影子
 
@@ -91,6 +99,46 @@ function rebase(room) {
   for (const k of Object.keys(m.segs)) {
     m.segs[k] = encode(decode(m.segs[k]).map((u) => Math.max(0, u - shift)));
   }
+  return true;
+}
+
+// 演示到点：墨迹全部回来，墙回到平常的样子
+function finish(room) {
+  clearTimeout(timers.get(room));
+  timers.delete(room);
+  if (!room.mode || room.mode.id !== "weather" || !room.mode.demo) return; // 已经收过了（结束、清空）
+  const api = apiFor(room);
+  api.end();
+  pushSystem(room, "风化墙演示结束了，墨迹都回来了");
+  api.announce();
+}
+
+// 和涂地战一个路子：只存截止时刻，定时器进程重启后由 restore 重挂，过了点就立刻收
+function arm(room) {
+  clearTimeout(timers.get(room));
+  const left = room.mode.endsAt - clock.now();
+  if (left <= 0) {
+    finish(room);
+    return;
+  }
+  const t = setTimeout(() => {
+    // 房间闲置被请出内存了：这个对象已经作废，下次读起来 restore 会另挂一个
+    if (store.rooms.get(room.code) !== room) return;
+    finish(room);
+  }, left);
+  t.unref?.();
+  timers.set(room, t);
+}
+
+// 最后被碰过的那一格什么时候褪到底，就什么时候结束（封顶 10 分钟）。返回截止时刻变没变
+function extendDemo(room) {
+  const m = room.mode;
+  let last = 0;
+  for (const str of Object.values(m.segs)) for (const u of decode(str)) if (u > last) last = u;
+  const end = Math.min(m.startedAt + DEMO_CAP_MS, m.t0 + (last + DEMO_SECONDS) * SECOND);
+  if (end === m.endsAt) return false;
+  m.endsAt = end;
+  arm(room);
   return true;
 }
 
@@ -176,6 +224,10 @@ module.exports = register({
     room.mode.days = DAY_CHOICES.includes(Number(msg.days)) ? Number(msg.days) : DEFAULT_DAYS;
     room.mode.segs = {};
     fillSegs(room);
+    if (room.mode.demo) {
+      room.mode.startedAt = room.mode.t0;
+      extendDemo(room);
+    }
     pushSystem(
       room,
       room.mode.demo
@@ -186,6 +238,8 @@ module.exports = register({
   },
 
   stop(room, user, api) {
+    clearTimeout(timers.get(room));
+    timers.delete(room);
     api.end(); // 遮罩撤掉，墨迹全部回来
   },
 
@@ -198,7 +252,8 @@ module.exports = register({
     if (event.type === "stroke_end" || event.type === "text") {
       const moved = rebase(room);
       touch(room, event.stroke);
-      if (moved) api.announce(); // 起点挪了，每个人手里那份都得换
+      const later = room.mode.demo && extendDemo(room); // 演示：刚描的这一块也得等它褪完
+      if (moved || later) api.announce(); // 起点挪了、倒计时变了，每个人手里那份都得换
       else api.save();
     } else if (event.type === "extend") {
       fillSegs(room);
@@ -212,6 +267,7 @@ module.exports = register({
       label: `风化墙 · ${how}褪成影子，描一遍就回来`,
       tone: "free",
       noEraser: true,
+      endsAt: room.mode.demo ? room.mode.endsAt : undefined, // 横幅照着倒数
       fade: {
         t0: room.mode.t0,
         cell: CELL,
@@ -229,6 +285,11 @@ module.exports = register({
     if (!room.mode.t0) room.mode.t0 = clock.now();
     if (!DAY_CHOICES.includes(room.mode.days)) room.mode.days = DEFAULT_DAYS;
     fillSegs(room);
+    if (room.mode.demo) {
+      if (!room.mode.startedAt) room.mode.startedAt = room.mode.t0;
+      if (!room.mode.endsAt) extendDemo(room);
+      else arm(room);
+    }
   },
 
   // 只给测试用
