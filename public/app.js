@@ -1330,7 +1330,7 @@ function modeNow() {
 // 冻结成墨迹图的旧笔也一样褪，因为遮罩根本不关心底下是哪一笔。
 
 const FADE_B64 = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
-let fadeCells = new Map(); // 段号 → 每格被碰过的时刻（开局后第几个小时）
+let fadeCells = new Map(); // 段号 → 每格被碰过的时刻（开局后第几个时间单位）
 let fadeTimer = 0;
 
 function fadeNow() {
@@ -1358,12 +1358,14 @@ function loadFade() {
   }
   refreshFadeMasks();
   clearInterval(fadeTimer);
-  fadeTimer = f ? setInterval(() => refreshFadeMasks(), 60 * 1000) : 0; // 以天计的褪色，一分钟看一眼足够
+  // 刷新频率跟着褪色的快慢走：以天计的一分钟看一眼足够，几分钟的演示得一两秒一次才看得出在褪
+  const every = f ? Math.max(1000, Math.min(60 * 1000, (f.span * f.unit) / 120)) : 0;
+  fadeTimer = f ? setInterval(() => refreshFadeMasks(), every) : 0;
 }
 
 // 碰过之后多久、淡到什么程度：先一动不动地留一阵（hold），再平滑地褪到只剩影子（floor）
 function fadeAlpha(f, h, now) {
-  const age = (now - f.t0) / f.hour - h;
+  const age = (now - f.t0) / f.unit - h;
   const x = Math.max(0, Math.min(1, age / f.span));
   const t = Math.max(0, Math.min(1, (x - f.hold) / (1 - f.hold)));
   return f.floor + (1 - f.floor) * (1 - t * t * (3 - 2 * t));
@@ -1413,7 +1415,7 @@ function touchFade(s) {
   const f = fadeNow();
   if (!f || !s || s.type === "eraser") return [];
   const { cols, rows } = fadeGrid(f);
-  const h = Math.max(0, Math.floor(((s.t || Date.now()) - f.t0) / f.hour));
+  const h = Math.max(0, Math.floor(((s.t || Date.now()) - f.t0) / f.unit));
   const touched = new Set();
   const mark = (x, y, r) => {
     const r0 = Math.max(0, Math.floor((y - r) / f.cell));
@@ -1569,7 +1571,13 @@ function renderModeMenu() {
     return;
   }
   for (const item of list) {
-    add(els.modeMenu, `开始${item.name}`, () => modeCmd("start", { mode: item.id }), item.hint);
+    if (!item.variants || !item.variants.length) {
+      add(els.modeMenu, `开始${item.name}`, () => modeCmd("start", { mode: item.id }), item.hint);
+      continue;
+    }
+    for (const v of item.variants) {
+      add(els.modeMenu, `开始${item.name}（${v.label}）`, () => modeCmd("start", { ...v.opts, mode: item.id }), item.hint);
+    }
   }
 
   function add(parent, text, onClick, title) {

@@ -53,6 +53,8 @@ function catalog() {
     id: m.id,
     name: m.name || m.id,
     hint: m.hint || "",
+    // 一个玩法可以有几档（风化墙的褪色时长），菜单一档一条；没有就只有一条
+    variants: Array.isArray(m.variants) ? m.variants.map((v) => ({ label: v.label, opts: v.opts })) : undefined,
   }));
 }
 

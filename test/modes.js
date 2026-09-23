@@ -568,6 +568,49 @@ test("weather: the fade map is saved with the room and read back", () => {
   assert.strictEqual(weather._decode(back.mode.segs[0])[8 * weather.ROWS + 8], h);
 });
 
+test("weather: the demo counts in seconds and fades in three minutes", () => {
+  const w = wiredRoom(null);
+  w.room.mode = { id: "weather" };
+  weather.init(w.room, { id: "u1" }, { demo: true }, modes.apiFor(w.room));
+  const f = w.sent.filter((m) => m.type === "mode").pop().state.fade;
+  assert.strictEqual(f.unit, 1000, "演示档一秒一个单位");
+  assert.strictEqual(f.span * f.unit, 3 * 60 * 1000, "三分钟褪到底");
+  wNow += 90 * 1000;
+  const id = "weather-demo-0001";
+  draw.handleStrokeStart(w.ws, { ...penMsg(), id, x: 400, y: 400 });
+  draw.handleStrokeEnd(w.ws, { id });
+  assert.strictEqual(cellHour(w.room, 0, 8, 8), 90, "按秒记，不是按小时");
+});
+
+test("weather: running out of room to count shifts the clock, and nothing visible changes", () => {
+  const w = wiredRoom(null);
+  w.room.mode = { id: "weather" };
+  weather.init(w.room, { id: "u1" }, { demo: true }, modes.apiFor(w.room));
+  const t0 = w.room.mode.t0;
+  // 一个半小时之后（远超两个字符记得下的 68 分钟）有人落笔
+  wNow += 90 * 60 * 1000;
+  w.sent.length = 0;
+  const id = "weather-demo-0002";
+  draw.handleStrokeStart(w.ws, { ...penMsg(), id, x: 400, y: 400 });
+  draw.handleStrokeEnd(w.ws, { id });
+  const m = w.room.mode;
+  assert.ok(m.t0 > t0, "起点往后挪了");
+  const fresh = cellHour(w.room, 0, 8, 8);
+  assert.ok(fresh < weather.MAX_U, "新落的这一笔记得下，got " + fresh);
+  assert.strictEqual((wNow - m.t0) / 1000 - fresh < 1, true, "而且记的就是「刚刚」");
+  assert.strictEqual(cellHour(w.room, 0, 20, 15), 0, "老格子减到 0——它早就褪到底了");
+  assert.ok(w.sent.some((x) => x.type === "mode" && x.state && x.state.fade.t0 === m.t0), "挪过之后给每个人重发了一份");
+});
+
+test("a mode's variants become menu entries", () => {
+  const entry = modes.catalog().find((c) => c.id === "weather");
+  assert.deepStrictEqual(
+    entry.variants.map((v) => v.label),
+    ["3 分钟演示", "1 天", "7 天", "30 天"]
+  );
+  assert.strictEqual(modes.catalog().find((c) => c.id === "daily").variants, undefined, "没有档位的玩法照旧一条");
+});
+
 test("clearing the wall tells everyone the mode is gone", () => {
   const { room, sent } = weatherRoom();
   sent.length = 0;

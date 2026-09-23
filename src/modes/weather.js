@@ -21,7 +21,9 @@
 // 玩法结束，遮罩撤掉，墨迹全部回到原来的样子：风化只是盖在墙上的一层，不改墙本身。
 //
 // 格子的年龄跟着房间存盘（room.mode.segs），每段一个字符串，每格两个字符，记的是
-// 「开局后第几个小时被碰过」。一小时的精度对以天计的褪色足够了，两个字符能记 170 天。
+// 「开局后第几个时间单位被碰过」。以天计的褪色用小时做单位；几分钟褪完的演示档用秒。
+// 两个字符只记得到 4095 个单位，快满时把起点往后挪、所有格子一起减掉（rebase）——
+// 被减到 0 的格子本来就早褪到底了，看上去什么都不变。
 //
 // 发给客户端的是一份通用的 `fade` 显示指令，客户端不认识「风化」这个词。
 // 落笔后的刷新客户端按同样的规则自己算（笔画消息里有它需要的一切），
@@ -35,15 +37,18 @@ const CELL = 50;
 const COLS = SEG_W / CELL; // 32
 const ROWS = CANVAS_H / CELL; // 20
 const HOUR = 60 * 60 * 1000;
+const SECOND = 1000;
 const PAD = 8; // 一笔除了自己的粗细，再往外多救这么一圈
 
 const DAY_CHOICES = [1, 3, 7, 30];
 const DEFAULT_DAYS = 7;
+// 演示档：当面给朋友看「褪了、描一下又回来了」，等不了一天
+const DEMO_SECONDS = 3 * 60;
 const HOLD = 0.1; // 前 10% 的时间一点不褪：刚画的总得先好好看两天
 const FLOOR = 0.08; // 褪到底剩下的影子
 
 const B64 = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
-const MAX_H = 64 * 64 - 1;
+const MAX_U = 64 * 64 - 1;
 
 const clock = { now: () => Date.now() };
 
@@ -61,12 +66,36 @@ function decode(str) {
   return cells;
 }
 
-function hourNow(room) {
-  return Math.max(0, Math.min(MAX_H, Math.floor((clock.now() - room.mode.t0) / HOUR)));
+// 这局的时间单位和褪到底要多少个单位
+function unitOf(m) {
+  return m.demo ? SECOND : HOUR;
+}
+
+function spanOf(m) {
+  return m.demo ? DEMO_SECONDS : m.days * 24;
+}
+
+function unitsNow(room) {
+  return Math.max(0, Math.min(MAX_U, Math.floor((clock.now() - room.mode.t0) / unitOf(room.mode))));
+}
+
+// 快记不下了：起点往后挪一半的量程，所有格子一起减。挪掉的那段比褪到底的时长还长
+// （量程一半是 2047 个单位，最长的 30 天也才 720 小时），所以被减到 0 的格子本来就只剩影子了。
+// 返回有没有挪过——挪过就得给每个人重发一份。
+function rebase(room) {
+  const m = room.mode;
+  const now = Math.floor((clock.now() - m.t0) / unitOf(m));
+  if (now < MAX_U - 16) return false;
+  const shift = now - Math.floor(MAX_U / 2);
+  m.t0 += shift * unitOf(m);
+  for (const k of Object.keys(m.segs)) {
+    m.segs[k] = encode(decode(m.segs[k]).map((u) => Math.max(0, u - shift)));
+  }
+  return true;
 }
 
 function freshSeg(room) {
-  return encode(new Array(COLS * ROWS).fill(hourNow(room)));
+  return encode(new Array(COLS * ROWS).fill(unitsNow(room)));
 }
 
 // 每一段都得有一份；缺的（新接出来的、旧存档里没有的）按「刚刚」补上
@@ -112,7 +141,7 @@ function cellsOf(stroke) {
 
 // 把这一笔经过的格子都记成「刚刚」
 function touch(room, stroke) {
-  const h = hourNow(room);
+  const h = unitsNow(room);
   const bySeg = new Map();
   for (const key of cellsOf(stroke)) {
     const col = Math.floor(key / ROWS);
@@ -133,14 +162,26 @@ module.exports = register({
   id: "weather",
   name: "风化墙",
   hint: "墨迹会慢慢褪成影子，有人再描一遍才留得住",
+  // 菜单照着它一档一条地长出来
+  variants: [
+    { label: "3 分钟演示", opts: { demo: true } },
+    { label: "1 天", opts: { days: 1 } },
+    { label: "7 天", opts: { days: 7 } },
+    { label: "30 天", opts: { days: 30 } },
+  ],
 
   init(room, user, msg, api) {
-    const days = DAY_CHOICES.includes(Number(msg.days)) ? Number(msg.days) : DEFAULT_DAYS;
     room.mode.t0 = clock.now();
-    room.mode.days = days;
+    room.mode.demo = msg.demo === true;
+    room.mode.days = DAY_CHOICES.includes(Number(msg.days)) ? Number(msg.days) : DEFAULT_DAYS;
     room.mode.segs = {};
     fillSegs(room);
-    pushSystem(room, `风化墙开始了：墨迹 ${days} 天褪成影子，想留住的就描一遍`);
+    pushSystem(
+      room,
+      room.mode.demo
+        ? "风化墙演示：墨迹 3 分钟褪成影子，描一遍就回来"
+        : `风化墙开始了：墨迹 ${room.mode.days} 天褪成影子，想留住的就描一遍`
+    );
     api.announce();
   },
 
@@ -155,8 +196,10 @@ module.exports = register({
 
   on(room, event, api) {
     if (event.type === "stroke_end" || event.type === "text") {
+      const moved = rebase(room);
       touch(room, event.stroke);
-      api.save();
+      if (moved) api.announce(); // 起点挪了，每个人手里那份都得换
+      else api.save();
     } else if (event.type === "extend") {
       fillSegs(room);
       api.announce();
@@ -164,15 +207,16 @@ module.exports = register({
   },
 
   publicState(room) {
+    const how = room.mode.demo ? "3 分钟" : `${room.mode.days} 天`;
     return {
-      label: `风化墙 · ${room.mode.days} 天褪成影子，描一遍就回来`,
+      label: `风化墙 · ${how}褪成影子，描一遍就回来`,
       tone: "free",
       noEraser: true,
       fade: {
         t0: room.mode.t0,
         cell: CELL,
-        hour: HOUR,
-        span: room.mode.days * 24, // 多少个小时褪到底
+        unit: unitOf(room.mode), // 一个时间单位多少毫秒
+        span: spanOf(room.mode), // 多少个单位褪到底
         hold: HOLD,
         floor: FLOOR,
         pad: PAD,
@@ -191,6 +235,8 @@ module.exports = register({
   _clock: clock,
   _decode: decode,
   _cellsOf: cellsOf,
+  _rebase: rebase,
+  MAX_U,
   COLS,
   ROWS,
 });
