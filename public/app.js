@@ -1947,6 +1947,7 @@ function onMessage(msg) {
   switch (msg.type) {
     case "snapshot":
       applySnapshot(msg);
+      if (msg.reveal) revealInGallery(msg.reveal);
       break;
     case "error":
       if (!els.wall.hidden && state.you) {
@@ -2552,12 +2553,12 @@ async function exportPng() {
 // 展厅按 1024 宽取每一段——斜着看的墙用不上原尺寸，显存省一半多
 const GALLERY_K = 0.64;
 
-function openGallery() {
+function openGallery(subtitle) {
   if (!window.Gallery) return;
   const list = sortedStrokes();
   const ok = window.Gallery.open({
     segments: state.segments,
-    title: `墙 ${state.code || ""}`,
+    title: `墙 ${state.code || ""}${subtitle ? ` · ${subtitle}` : ""}`,
     render: async (i) => {
       const c = scratchCanvas(GALLERY_K);
       await drawSegment(c.getContext("2d"), 0, i, GALLERY_K, list, scratchCanvas(GALLERY_K));
@@ -2565,6 +2566,15 @@ function openGallery() {
     },
   });
   if (!ok) toast("这个浏览器打不开 3D 展厅");
+}
+
+// 揭晓：藏着的都交还给大家了，这时候从头走一遍整条卷轴——这是整局的高潮。
+// 调用时刚换上揭晓后的整墙快照；展厅要是已经开着，里面是揭晓前的样子，关了重开。
+function revealInGallery(what) {
+  if (state.drawing) endStroke(); // 展厅盖上来之后，松手事件就到不了墙上了
+  cancelText();
+  if (window.Gallery && window.Gallery.isOpen) window.Gallery.close();
+  openGallery(`${what}揭晓`);
 }
 
 function showLobby() {

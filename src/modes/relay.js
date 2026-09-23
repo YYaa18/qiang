@@ -126,7 +126,7 @@ function finish(room, api) {
   const n = legs(room).length;
   room.mode.revealed = true;
   api.end(); // 先摘掉玩法，下面那一份整墙才是干干净净的
-  presence.resend(room);
+  presence.resend(room, { reveal: "接龙" });
   pushSystem(room, `接龙揭晓了 · 整条卷轴一共 ${n} 段，都看得见了`);
 }
 

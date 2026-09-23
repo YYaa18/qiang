@@ -31,9 +31,12 @@ function snapshotFor(room, user) {
 }
 
 // 让屋里每个人重新拿一份整墙。揭晓的时候用：之前藏着的笔画到这一刻才发得出去。
-function resend(room) {
+// 给屋里每个人重发一份整墙。extra 并进这一份快照里——
+// 比如 { reveal: "接龙" }：客户端据此在拿到揭晓后的墙之后打开展厅。
+// 只挂在这一次重发上，之后进门的人拿到的是普通快照，不会被突然拉进展厅。
+function resend(room, extra) {
   for (const u of room.users.values()) {
-    if (u.ws) send(u.ws, snapshotFor(room, u));
+    if (u.ws) send(u.ws, extra ? { ...snapshotFor(room, u), ...extra } : snapshotFor(room, u));
   }
 }
 

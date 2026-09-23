@@ -24,7 +24,7 @@ const { register } = require("./index");
 function finish(room, api) {
   room.mode.revealed = true;
   api.end();
-  presence.resend(room);
+  presence.resend(room, { reveal: "盲画" });
   pushSystem(room, "盲画揭晓了，看看自己画的是什么");
 }
 

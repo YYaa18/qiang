@@ -978,6 +978,13 @@ async function main() {
 
       // 揭晓就是这局的终点：墙回到平常的样子，一点玩法的痕迹都不留
       assert(after.mode === null, "玩法已经摘掉了，got " + JSON.stringify(after.mode));
+      // 这一份快照带着揭晓的记号，客户端据此打开展厅走一遍
+      assert(after.reveal === "接龙", "揭晓快照带着记号，got " + after.reveal);
+
+      // 揭晓之后才进门的人拿到的是普通快照：不该被突然拉进展厅
+      const c = track(await join(port, { code, name: "丙", clientId: uuid() }));
+      const csnap = await c.wait("snapshot");
+      assert(csnap.reveal === undefined, "后来的人没有揭晓记号");
 
       // 于是这面墙又是普通的墙了，谁都能画
       const mine = drawStrokes(b, "#3B5BDB", 1, 900);
@@ -1147,6 +1154,7 @@ async function main() {
       const after = await a2.wait((m) => m.type === "snapshot" && m.mode === null);
       const all = after.strokes.map((s) => s.id);
       for (const id of [...mine, theirs[0]]) assert(all.includes(id), "揭晓后全都看得见");
+      assert(after.reveal === "盲画", "揭晓快照带着记号，got " + after.reveal);
     });
 
     await test("tell: the word reaches exactly one person", async () => {
@@ -1203,6 +1211,7 @@ async function main() {
       await b.wait((m) => m.type === "chat" && m.message.text.includes(word));
       const after = await b.wait((m) => m.type === "snapshot" && m.mode === null);
       assert(after.strokes.some((s) => s.id === drew[0]), "画的东西都还在");
+      assert(after.reveal === "我说你画", "揭晓快照带着记号，got " + after.reveal);
     });
 
     await test("tell: the word goes back on the wall when its holder leaves", async () => {

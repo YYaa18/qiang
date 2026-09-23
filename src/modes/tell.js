@@ -60,7 +60,7 @@ function finish(room, api) {
   const word = room.mode.word;
   room.mode.revealed = true;
   api.end();
-  presence.resend(room);
+  presence.resend(room, { reveal: "我说你画" });
   pushSystem(room, `谜底是「${word}」`);
 }
 
