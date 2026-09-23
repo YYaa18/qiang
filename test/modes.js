@@ -274,6 +274,100 @@ test("undo and chat are wired to the gate too", () => {
   assert.strictEqual(sent.filter((m) => m.type === "error").length, 2, "两次都给了理由");
 });
 
+// ───────────── 一日一笔 ─────────────
+//
+// 跨天没法真的等一天，所以把玩法的时钟拨过去。
+
+const daily = require("../src/modes/daily");
+
+const DAY = 24 * 60 * 60 * 1000;
+let fakeNow = Date.parse("2026-09-23T10:00:00+08:00");
+daily._clock.now = () => fakeNow;
+
+function dailyRoom() {
+  const w = wiredRoom(null);
+  w.room.mode = { id: "daily" };
+  daily.init(w.room, { id: "u1" }, {}, modes.apiFor(w.room));
+  return w;
+}
+
+let strokeNo = 0;
+function oneStroke(ws) {
+  const id = `daily-stroke-${String(++strokeNo).padStart(4, "0")}`;
+  draw.handleStrokeStart(ws, { ...penMsg(), id });
+  draw.handleStrokeEnd(ws, { id });
+  return id;
+}
+
+const lastState = (sent) => sent.filter((m) => m.type === "mode").pop().state;
+
+test("daily: one stroke today, the second is refused", () => {
+  const { room, ws, sent } = dailyRoom();
+  assert.strictEqual(lastState(sent).label, "第 1 天 · 今天这一笔还没落");
+  oneStroke(ws);
+  assert.strictEqual(room.strokes.length, 1);
+  assert.strictEqual(lastState(sent).blocked, true);
+  sent.length = 0;
+  draw.handleStrokeStart(ws, { ...penMsg(), id: "daily-too-many-000" });
+  assert.strictEqual(room.open.size, 0, "第二笔没有开出来");
+  assert.match(sent.find((m) => m.type === "error").message, /明天再来/);
+});
+
+test("daily: undoing today's stroke gives it back", () => {
+  const { room, ws, sent } = dailyRoom();
+  oneStroke(ws);
+  draw.handleUndo(ws);
+  assert.strictEqual(lastState(sent).left, 1, "撤了就还你");
+  const again = oneStroke(ws);
+  assert.ok(room.strokes.some((s) => s.id === again && !s.hidden), "还回来的那一笔能画");
+});
+
+test("daily: redo cannot sneak in a second stroke", () => {
+  const { room, ws, sent } = dailyRoom();
+  oneStroke(ws);
+  draw.handleUndo(ws);
+  oneStroke(ws); // 用掉还回来的额度
+  sent.length = 0;
+  draw.handleRedo(ws);
+  assert.ok(sent.some((m) => m.type === "error"), "重做被拦下了");
+  assert.strictEqual(room.strokes.filter((s) => !s.hidden).length, 1);
+});
+
+test("daily: a new day brings a new stroke, and yesterday's cannot be undone", () => {
+  const { room, ws, sent } = dailyRoom();
+  const yesterday = oneStroke(ws);
+  fakeNow += DAY;
+  modes.apiFor(room).announce();
+  assert.strictEqual(lastState(sent).label, "第 2 天 · 今天这一笔还没落");
+
+  sent.length = 0;
+  draw.handleUndo(ws);
+  assert.match(sent.find((m) => m.type === "error").message, /撤不掉/);
+  assert.ok(room.strokes.some((s) => s.id === yesterday && !s.hidden), "昨天那笔还在墙上");
+
+  oneStroke(ws);
+  assert.strictEqual(lastState(sent).left, 0);
+  fakeNow -= DAY;
+});
+
+test("daily: midnight is found in the configured zone, not the server's", () => {
+  // 北京时间 23:30 → 离零点半小时，不管服务器在哪个时区
+  const t = Date.parse("2026-09-23T23:30:00+08:00");
+  assert.strictEqual(daily._msToNextDay(t), 30 * 60 * 1000);
+});
+
+test("daily: stopping lifts the limit and leaves the drawing", () => {
+  const { room, ws } = dailyRoom();
+  oneStroke(ws);
+  modes.command(ws, { cmd: "stop" }); // ws 不是房主：不该停
+  assert.strictEqual(room.mode && room.mode.id, "daily");
+  room.hostId = "u1";
+  modes.command(ws, { cmd: "stop" });
+  assert.strictEqual(room.mode, null);
+  oneStroke(ws);
+  assert.strictEqual(room.strokes.length, 2, "玩法收了就随便画");
+});
+
 fs.rmSync(dataDir, { recursive: true, force: true });
 
 console.log("");

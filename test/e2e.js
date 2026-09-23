@@ -1077,6 +1077,31 @@ async function main() {
       assert(ok, "还回来的那一笔真的能用");
     });
 
+    await test("daily: one stroke a day, over the real wire", async () => {
+      const hostId = uuid();
+      const code = await createRoom(port, hostId);
+      const a = track(await join(port, { code, name: "甲", clientId: hostId }));
+      const asnap = await a.wait("snapshot");
+      assert(asnap.modes.some((m) => m.id === "daily"), "清单里有一日一笔");
+
+      a.send({ type: "mode", cmd: "start", mode: "daily" });
+      const am = await a.wait("mode");
+      assert(am.state.label === "第 1 天 · 今天这一笔还没落", "got " + am.state.label);
+
+      drawStrokes(a, asnap.you.color, 1, 200);
+      const spent = await a.wait((m) => m.type === "mode" && m.state.left === 0);
+      assert(spent.state.blocked === true);
+
+      a.send({ type: "stroke_start", id: uuid(), strokeType: "pen", color: asnap.you.color, width: 8, x: 400, y: 400 });
+      const err = await a.wait("error");
+      assert(err.code === "not_allowed" && err.message.includes("明天"), "got " + err.message);
+
+      // 新进来的人拿到的快照里也带着状态
+      const b = track(await join(port, { code, name: "乙", clientId: uuid() }));
+      const bsnap = await b.wait("snapshot");
+      assert(bsnap.mode && bsnap.mode.left === 1, "乙今天的一笔还在");
+    });
+
     await test("blind: only the person drawing cannot see it", async () => {
       const hostId = uuid();
       const code = await createRoom(port, hostId);

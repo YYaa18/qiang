@@ -18,6 +18,7 @@ require("./modes/limit");
 require("./modes/blind");
 require("./modes/tell");
 require("./modes/turf");
+require("./modes/daily");
 
 const ROUTES = {
   join: (ws, msg) => presence.handleJoin(ws, msg),
