@@ -706,6 +706,30 @@ test("phone: a sentence is trimmed to thirty characters", () => {
   assert.strictEqual([...said.text].length, 30);
 });
 
+test("phone: even the longest caption fits on its own segment", () => {
+  const { room } = wiredRoom(null);
+  room.mode = { id: "phone" };
+  const longName = "名".repeat(16); // 名字最长 16 个字
+  const jia = { id: "u1", name: longName };
+  phone.init(room, jia, {}, modes.apiFor(room));
+  room.strokes.push({ id: "phone-fake-0002", seq: room.nextSeq++, userId: "u1", type: "pen", points: [{ x: 300, y: 300 }], hidden: false });
+  phone.command(room, jia, "pass", {}, modes.apiFor(room));
+  const yi = { id: "u2", name: longName };
+  phone.command(room, yi, "take", {}, modes.apiFor(room));
+  phone.command(room, yi, "write", { text: "很".repeat(30) }, modes.apiFor(room)); // 话最长 30 个字
+  room.hostId = "u1";
+  phone.command(room, jia, "reveal", {}, modes.apiFor(room));
+  const caps = room.strokes.filter((s) => s.type === "text");
+  assert.ok(caps.length >= 2);
+  for (const c of caps) {
+    const seg = Math.floor(c.x / 1600);
+    const right = c.x + [...c.text].length * c.size;
+    assert.ok(right <= (seg + 1) * 1600, `「${c.text}」出了这一段：右边到 ${right}`);
+    assert.ok(c.size >= 20, "再长也不小于 20px，got " + c.size);
+    assert.ok(c.y >= 0 && c.y + c.size <= 1000, "上下都在纸里");
+  }
+});
+
 fs.rmSync(dataDir, { recursive: true, force: true });
 
 console.log("");

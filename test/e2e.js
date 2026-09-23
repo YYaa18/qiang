@@ -1213,6 +1213,9 @@ async function main() {
       const texts = rev.strokes.filter((s) => s.type === "text").map((s) => s.text);
       assert(texts.some((t) => t.startsWith(`题目「${word}」`)), "题目写在第一幅画上，got " + texts);
       assert(texts.includes("乙看成了「一只戴帽子的猫」"), "乙那句话写在第一幅画底下");
+      const cap = rev.strokes.find((s) => s.type === "text" && s.text === "乙看成了「一只戴帽子的猫」");
+      assert(cap.size === 44, "短的说明用最大的字号当标题，got " + cap.size);
+      assert(cap.y + cap.size < 1000, "底下那行没掉出纸外");
       assert(rev.strokes.some((s) => s.id === second[0]), "第二幅画也摊开了");
     });
 

@@ -85,22 +85,37 @@ function clean(text) {
     .slice(0, TEXT_MAX);
 }
 
+// 揭晓时写在卷轴上的说明要当标题看：尽量大，但一行得放得进一段纸。
+// 按每个字一个字号宽来估（中文正好，英文数字更窄，只会更宽裕）
+const CAPTION_MAX = 44;
+const CAPTION_MIN = 20;
+const CAPTION_X = 32;
+
+function captionSize(text) {
+  const room = SEG_W - CAPTION_X * 2;
+  return Math.max(CAPTION_MIN, Math.min(CAPTION_MAX, Math.floor(room / [...text].length)));
+}
+
+function caption(room, seg, text, where) {
+  const size = captionSize(text);
+  const y = where === "top" ? 26 : CANVAS_H - size - 26;
+  placeStroke(room, { type: "text", x: seg * SEG_W + CAPTION_X, y, text, size, color: "#1A1A1A" });
+}
+
 // 揭晓：把每一步的话写到卷轴上，再把整条卷轴交还给所有人
 function finish(room, api) {
   const m = room.mode;
   m.revealed = true; // 先打开可见性，下面放上去的字每个人都收得到
-  const ink = "#1A1A1A";
   for (const [i, st] of steps(room).entries()) {
-    const x = st.seg * SEG_W + 28;
     const who = st.byName || (st.by ? nameOf(room, st.by) : "");
     if (st.kind === "draw") {
       let text;
       if (i === 0) text = `题目「${st.prompt}」${who ? ` · ${who}画的` : ""}`;
       else if (st.done) text = `${who}照着「${st.prompt}」画的`;
       else text = `「${st.prompt}」还没人画完`;
-      placeStroke(room, { type: "text", x, y: 22, text, color: ink });
+      caption(room, st.seg, text, "top");
     } else if (st.done) {
-      placeStroke(room, { type: "text", x, y: CANVAS_H - 50, text: `${who}看成了「${st.text}」`, color: ink });
+      caption(room, st.seg, `${who}看成了「${st.text}」`, "bottom");
     }
   }
   const first = steps(room)[0];

@@ -9,6 +9,13 @@ const PAD = 24; // 视图四周留白（屏幕像素）
 const EXTEND_GAP = 40; // 纸右缘到「接一段」按钮的距离（画布单位）
 const EXTEND_W = 140;
 const TEXT_FONT = '22px "PingFang SC","Microsoft YaHei",sans-serif';
+
+// 文字笔画的字体。人写的字都是 22px；玩法放上去的字（传话筒揭晓时的说明）可以带 size 放大
+function fontOf(s) {
+  const size = Number(s && s.size);
+  if (!Number.isFinite(size) || size === 22) return TEXT_FONT;
+  return TEXT_FONT.replace(/^\d+px/, `${Math.max(10, Math.min(80, size))}px`);
+}
 const PEN_WIDTHS = [2, 4, 8, 14, 24];
 const ERASER_WIDTHS = [8, 14, 24, 36, 56];
 const BRUSHES = [
@@ -390,7 +397,7 @@ const measureCtx = document.createElement("canvas").getContext("2d");
 // 笔画的横向范围（画布单位），用来判断它落在哪几段
 function strokeBox(s) {
   if (s.type === "text") {
-    measureCtx.font = TEXT_FONT;
+    measureCtx.font = fontOf(s);
     return { x0: s.x, x1: s.x + measureCtx.measureText(s.text || "").width };
   }
   let x0 = Infinity;
@@ -432,7 +439,7 @@ function drawStroke(ctx, s) {
     ctx.rect(0, 0, wallW(), CANVAS_H);
     ctx.clip();
     ctx.fillStyle = s.color;
-    ctx.font = TEXT_FONT;
+    ctx.font = fontOf(s);
     ctx.textBaseline = "top";
     ctx.fillText(s.text || "", s.x, s.y);
     ctx.restore();
