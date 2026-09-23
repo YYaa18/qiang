@@ -668,6 +668,44 @@ test("clearing the wall tells everyone the mode is gone", () => {
   assert.ok(gone && gone.state === null, "清空之后横幅和遮罩都该撤掉");
 });
 
+// ───────────── 传话筒 ─────────────
+
+const phone = require("../src/modes/phone");
+
+test("phone: whoever drops out, the next one picks up the half-drawn picture", () => {
+  const { room, ws } = wiredRoom(null);
+  room.mode = { id: "phone" };
+  phone.init(room, { id: "u1", name: "甲" }, {}, modes.apiFor(room));
+  const id = "phone-stroke-0001";
+  draw.handleStrokeStart(ws, { ...penMsg(), id, x: 300, y: 300 });
+  draw.handleStrokeEnd(ws, { id });
+  const half = room.strokes.find((s) => s.id === id);
+
+  modes.after(room, { type: "leave", userId: "u1" });
+  assert.strictEqual(room.mode.holder, null, "棒放回墙上了");
+
+  const yi = { id: "u2", name: "乙" };
+  const bing = { id: "u3", name: "丙" };
+  assert.strictEqual(modes.canSee(room, yi, half), false, "接之前谁也看不见");
+  phone.command(room, yi, "take", {}, modes.apiFor(room));
+  assert.strictEqual(room.mode.holder, "u2");
+  assert.strictEqual(modes.canSee(room, yi, half), true, "接手的人看得见画了一半的，好接着画");
+  assert.strictEqual(modes.canSee(room, bing, half), false, "没轮到的人还是看不见");
+});
+
+test("phone: a sentence is trimmed to thirty characters", () => {
+  const { room } = wiredRoom(null);
+  room.mode = { id: "phone" };
+  phone.init(room, { id: "u1", name: "甲" }, {}, modes.apiFor(room));
+  room.strokes.push({ id: "phone-fake-0001", seq: room.nextSeq++, userId: "u1", type: "pen", points: [{ x: 300, y: 300 }], hidden: false });
+  phone.command(room, { id: "u1", name: "甲" }, "pass", {}, modes.apiFor(room));
+  const yi = { id: "u2", name: "乙" };
+  phone.command(room, yi, "take", {}, modes.apiFor(room));
+  phone.command(room, yi, "write", { text: "很".repeat(80) }, modes.apiFor(room));
+  const said = room.mode.steps.find((s) => s.kind === "write");
+  assert.strictEqual([...said.text].length, 30);
+});
+
 fs.rmSync(dataDir, { recursive: true, force: true });
 
 console.log("");

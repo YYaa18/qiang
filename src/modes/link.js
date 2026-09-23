@@ -17,7 +17,7 @@
 //
 // 线只按几何判交叉，不算粗细：两条粗线挨得很近、看着叠在一起，只要没真的穿过去就算数。
 
-const { SEG_W, CANVAS_H, MAX_SEGMENTS } = require("../config");
+const { SEG_W, CANVAS_H } = require("../config");
 const { pushSystem } = require("../wall/chat");
 const presence = require("../wall/presence");
 const { placeStroke, retractStroke } = require("../wall/draw");
@@ -220,18 +220,6 @@ function elapsed(room) {
   return `${Math.floor(m / 60)} 小时 ${m % 60} 分`;
 }
 
-// 最后一段是空的就直接用，不白白接长；否则接一段新的
-function paperFor(room, user) {
-  const last = room.segments - 1;
-  const lo = last * SEG_W;
-  const blank =
-    !(room.segVersions && room.segVersions[last]) &&
-    !room.strokes.some((s) => !s.hidden && (s.points || [{ x: s.x }]).some((p) => p.x >= lo - 40));
-  if (blank || room.segments >= MAX_SEGMENTS) return last;
-  presence.growWall(room, user.id);
-  return room.segments - 1;
-}
-
 module.exports = register({
   id: "link",
   name: "连线谜题",
@@ -239,7 +227,7 @@ module.exports = register({
 
   init(room, user, msg, api) {
     const n = Math.max(MIN_PAIRS, Math.min(MAX_PAIRS, Math.round(Number(msg.pairs)) || DEFAULT_PAIRS));
-    const seg = paperFor(room, user);
+    const seg = presence.freshPaper(room, user.id);
     const x0 = seg * SEG_W;
     const layout = generate(n, x0);
     if (!layout) {

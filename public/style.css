@@ -1140,6 +1140,22 @@ button:disabled { opacity: 0.4; cursor: default; }
   cursor: pointer;
 }
 #mode-act:hover { opacity: 0.85; }
+
+/* 横幅上的输入框：玩法要你写一句话时才出现 */
+#mode-input {
+  width: 15em;
+  min-width: 0;
+  flex: 0 1 auto;
+  padding: 4px 10px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: var(--field);
+  color: var(--ink);
+  font: inherit;
+  font-size: 13px;
+}
+#mode-input:focus { outline: 2px solid var(--me, var(--ink)); outline-offset: 0; }
+#mode-input[hidden] { display: none; }
 #mode-act[hidden] { display: none; }
 
 /* 盖住不属于我的那部分卷轴。盖的只是眼睛看得见的部分——

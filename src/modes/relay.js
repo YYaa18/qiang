@@ -208,6 +208,9 @@ module.exports = register({
       m.holder = null; // 棒放回墙上，谁来谁接
       startLeg(room, null);
       pushSystem(room, `${user.name}画完了一段，笔放在墙上了`);
+      // 窄缝挪到了刚画完的这一段上。窄缝里那几笔落下时谁都还看不见，没人收到过——
+      // 可见范围一变就得重发整墙，否则接棒的人只能等到重连才看得见要接的线
+      presence.resend(room);
       api.announce();
       return;
     }

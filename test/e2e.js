@@ -945,6 +945,11 @@ async function main() {
       const took = await b.wait((m) => m.type === "mode" && m.state.drawable);
       assert(took.state.drawable.x0 === 1600, "乙接着甲那一段往右画");
       assert(took.state.hint, "有一条窄缝可以接");
+      // 乙一直在屋里：窄缝里那一笔落下时他还看不见，交棒时得补发给他，不能等到重连
+      assert(
+        b.msgs.some((m) => m.type === "snapshot" && m.strokes.some((s) => s.id === atSeam[0])),
+        "乙手里有窄缝里那一笔，接得上"
+      );
 
       // 新来的丙拿到的整墙里，只该有窄缝里那一笔
       const c = track(await join(port, { code, name: "丙", clientId: uuid() }));
@@ -1144,6 +1149,71 @@ async function main() {
       await b.wait((m) => m.type === "undo" && m.id === id);
       const why = await a.wait((m) => m.type === "error" && m !== err);
       assert(why.message === "要连到同色的另一个点上", "got " + why.message);
+    });
+
+    await test("phone: draw, say, draw — each only sees the step before", async () => {
+      const hostId = uuid();
+      const code = await createRoom(port, hostId);
+      const a = track(await join(port, { code, name: "甲", clientId: hostId }));
+      const asnap = await a.wait("snapshot");
+      const b = track(await join(port, { code, name: "乙", clientId: uuid() }));
+      await b.wait("snapshot");
+
+      a.send({ type: "mode", cmd: "start", mode: "phone" });
+      const am = await a.wait((m) => m.type === "mode" && m.state);
+      const word = am.state.label.match(/「(.+)」/)[1];
+      assert(am.state.drawable.x0 === 0, "空墙直接画在第一段");
+      await b.wait((m) => m.type === "mode" && m.state);
+      assert(!JSON.stringify(b.msgs).includes(word), "题目只给画的人");
+
+      // 没画就交：不行
+      a.send({ type: "mode", cmd: "pass" });
+      const empty = await a.wait("error");
+      assert(empty.message === "至少画一笔再交出去", "got " + empty.message);
+
+      const first = drawStrokes(a, asnap.you.color, 1, 300);
+      await a.wait((m) => m.type === "stroke_end" && m.id === first[0]);
+      await delay(150);
+      assert(!b.msgs.some((m) => m.type === "stroke_end"), "乙看不见甲在画什么");
+
+      a.send({ type: "mode", cmd: "pass" });
+      const aw = await a.wait((m) => m.type === "mode" && m.state && m.state.label.includes("上一步是你做的"));
+      assert(!aw.state.action, "自己画的不能自己接着说");
+      const bm = await b.wait((m) => m.type === "mode" && m.state && m.state.action && m.state.action.cmd === "take");
+      assert(bm.state.label === "有一幅画等人来看");
+
+      // 乙接过来：这时候才该看见那幅画——而那一笔落下时他没收到过，得补发
+      b.send({ type: "mode", cmd: "take" });
+      const seen = await b.wait((m) => m.type === "snapshot" && m.strokes.some((s) => s.id === first[0]));
+      assert(seen, "接过来就看得见要说的那幅画");
+      const bw = await b.wait((m) => m.type === "mode" && m.state && m.state.action && m.state.action.cmd === "write");
+      assert(bw.state.action.input && bw.state.blocked === true, "横幅上有输入框，而且不能画");
+
+      b.send({ type: "mode", cmd: "write", text: "   " });
+      assert((await b.wait("error")).message === "写一句话再交出去", "空话不收");
+      b.send({ type: "mode", cmd: "write", text: "一只戴帽子的猫" });
+      const grew = await a.wait("extend");
+      assert(grew.segments === 2, "下一幅画在新的一段");
+
+      // 甲接着画乙那句话：看得见那句话，看不见（也不需要看）乙看过的画以外的东西
+      const at = await a.wait((m) => m.type === "mode" && m.state && m.state.action && m.state.action.cmd === "take");
+      assert(at, "上一步是乙做的，甲可以接");
+      a.send({ type: "mode", cmd: "take" });
+      const ad = await a.wait((m) => m.type === "mode" && m.state && m.state.label === "照着画：「一只戴帽子的猫」");
+      assert(ad.state.drawable.x0 === 1600);
+      const second = drawStrokes(a, asnap.you.color, 1, 1900);
+      await a.wait((m) => m.type === "stroke_end" && m.id === second[0]);
+      await delay(150);
+      assert(!b.msgs.some((m) => m.type === "stroke_end" && m.id === second[0]), "乙看不见第二幅画");
+      assert(!JSON.stringify(b.msgs).includes(word), "乙到现在也不知道最初的题目");
+
+      // 揭晓：每一步的话写在卷轴上，展厅打开
+      a.send({ type: "mode", cmd: "reveal" });
+      const rev = await b.wait((m) => m.type === "snapshot" && m.reveal === "传话筒");
+      const texts = rev.strokes.filter((s) => s.type === "text").map((s) => s.text);
+      assert(texts.some((t) => t.startsWith(`题目「${word}」`)), "题目写在第一幅画上，got " + texts);
+      assert(texts.includes("乙看成了「一只戴帽子的猫」"), "乙那句话写在第一幅画底下");
+      assert(rev.strokes.some((s) => s.id === second[0]), "第二幅画也摊开了");
     });
 
     await test("blind: only the person drawing cannot see it", async () => {

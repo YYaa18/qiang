@@ -95,6 +95,7 @@ const els = {
   modeBar: $("mode-bar"),
   modeText: $("mode-text"),
   modeAct: $("mode-act"),
+  modeInput: $("mode-input"),
   modeMask: $("mode-mask"),
   maskLeft: $("mask-left"),
   maskRight: $("mask-right"),
@@ -1269,6 +1270,7 @@ function upsertStroke(stroke) {
 }
 
 function applySnapshot(snap) {
+  const hadDrawable = drawableKey();
   state.code = snap.code;
   state.users = snap.users || [];
   state.knownIds = new Set(state.users.map((u) => u.id));
@@ -1295,6 +1297,8 @@ function applySnapshot(snap) {
   setupTiles();
   rebuildInk();
   redrawLive();
+  // 玩法换棒时会先重发整墙、再发玩法状态——新的那一段就在这份快照里，只看玩法消息的话镜头就不会动
+  if (drawableKey() && drawableKey() !== hadDrawable) lookAtDrawable();
   renderChat(true);
   renderRoster();
   renderSwatches();
@@ -1519,6 +1523,21 @@ function renderModeBar() {
     els.modeAct.hidden = true;
     delete els.modeAct.dataset.cmd;
   }
+  // 按钮可以带一个输入框（传话筒里写那一句话）：点按钮时把框里的字一起发出去。
+  // 横幅会因为别的事重画，正在输入的字不能被冲掉，所以只在框出现、消失时动它
+  const input = m.action && m.action.input;
+  if (input) {
+    if (els.modeInput.hidden) {
+      els.modeInput.value = "";
+      els.modeInput.hidden = false;
+      els.modeInput.focus();
+    }
+    els.modeInput.placeholder = input.placeholder || "";
+    els.modeInput.maxLength = input.max || 60;
+  } else {
+    els.modeInput.hidden = true;
+    els.modeInput.value = "";
+  }
   renderModeMask();
 }
 
@@ -1594,9 +1613,15 @@ function renderModeMenu() {
 }
 
 // 玩法限定了可画范围时，把镜头带过去
+// 我能画的那一块，拿来比较「是不是换了一块」
+function drawableKey() {
+  const d = state.mode && state.mode.drawable;
+  return d ? `${d.x0}:${d.x1}` : "";
+}
+
 function lookAtDrawable() {
   const m = modeNow();
-  if (!m || !m.drawable) return;
+  if (!m || !m.drawable || !state.scale) return; // 刚进门还没排好版时先不动，回正之后自然在那儿
   // 能画的那块装不下就缩小到装得下：接龙的一棒、谜题的一段纸，都得一眼看全
   const span = m.drawable.x1 - m.drawable.x0;
   const fitW = (els.desk.clientWidth - PAD * 2) / span;
@@ -1607,6 +1632,21 @@ function lookAtDrawable() {
   state.panX = -(mid - view / 2) * state.scale;
   clampPan();
   applyView();
+}
+
+function submitModeAction() {
+  const cmd = els.modeAct.dataset.cmd;
+  if (!cmd) return;
+  if (els.modeInput.hidden) {
+    modeCmd(cmd);
+    return;
+  }
+  const text = els.modeInput.value.trim();
+  if (!text) {
+    els.modeInput.focus();
+    return;
+  }
+  modeCmd(cmd, { text });
 }
 
 function modeCmd(cmd, extra) {
@@ -2223,7 +2263,7 @@ function onMessage(msg) {
       updateStacks();
       break;
     case "mode": {
-      const had = !!(state.mode && state.mode.drawable);
+      const had = drawableKey();
       const hidBefore = !!(state.mode && state.mode.hideOwnInk);
       state.mode = msg.state || null;
       loadFade();
@@ -2236,8 +2276,8 @@ function onMessage(msg) {
         rebuildInk();
         redrawLive();
       }
-      // 刚轮到我：把镜头带到我能画的那一段
-      if (!had && state.mode && state.mode.drawable) lookAtDrawable();
+      // 刚轮到我、或者轮到我的换了一段：把镜头带过去
+      if (drawableKey() && drawableKey() !== had) lookAtDrawable();
       break;
     }
     case "cursors":
@@ -3198,9 +3238,12 @@ function bindUi() {
     els.menu.hidden = true;
     send({ type: "clear_start" });
   });
-  els.modeAct.addEventListener("click", () => {
-    const cmd = els.modeAct.dataset.cmd;
-    if (cmd) modeCmd(cmd);
+  els.modeAct.addEventListener("click", submitModeAction);
+  els.modeInput.addEventListener("keydown", (e) => {
+    if (e.key === "Enter" && !e.isComposing) {
+      e.preventDefault();
+      submitModeAction();
+    }
   });
   els.menuRename.addEventListener("click", () => {
     els.menu.hidden = true;

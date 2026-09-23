@@ -5,7 +5,7 @@
 // 身份就是客户端自己生成的 clientId，没有登录。断线有 10 秒宽限期（刷新和地铁里用得着），
 // 主动点「离开」则立刻腾出座位。
 
-const { MAX_USERS, GRACE_MS, MAX_SEGMENTS } = require("../config");
+const { MAX_USERS, GRACE_MS, MAX_SEGMENTS, SEG_W } = require("../config");
 const { send, broadcast } = require("../net");
 const { getRoom, rooms, scheduleSave, ctxOf } = require("../store");
 const { assignColor, publicUsers, snapshotMsg } = require("../room");
@@ -226,6 +226,19 @@ function handleExtend(ws) {
   pushSystem(room, `${user.name}把墙接长了一段`);
 }
 
+// 给玩法一段干净的纸，返回段号：最后一段本来就空着就直接用，不白白接长；否则接一段新的。
+// 接满了（MAX_SEGMENTS）就只能用最后一段。
+function freshPaper(room, userId) {
+  const last = room.segments - 1;
+  const lo = last * SEG_W;
+  const blank =
+    !(room.segVersions && room.segVersions[last]) &&
+    !room.strokes.some((s) => !s.hidden && (s.points || [{ x: s.x }]).some((p) => p.x >= lo - 40));
+  if (blank || room.segments >= MAX_SEGMENTS) return last;
+  growWall(room, userId);
+  return room.segments - 1;
+}
+
 // 墙向右接一段。玩法也用它（连线谜题要一段干净的纸），所以不管闸门和锁——那是调用方的事
 function growWall(room, userId) {
   room.segments += 1;
@@ -244,4 +257,5 @@ module.exports = {
   handleLock,
   handleExtend,
   growWall,
+  freshPaper,
 };
